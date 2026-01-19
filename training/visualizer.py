@@ -155,8 +155,8 @@ class TrainingVisualizer:
         predicted_noise = model.predict_noise(noisy_images, t, conditioning)
         
         # Compute denoised image (x0 = (x_t - sqrt(1-alpha_bar) * noise) / sqrt(alpha_bar))
-        sqrt_alpha_bar = model.sqrt_alpha_bar[t][:, None, None, None]
-        sqrt_one_minus_alpha_bar = model.sqrt_one_minus_alpha_bar[t][:, None, None, None]
+        sqrt_alpha_bar = model.sqrt_alphas_cumprod[t][:, None, None, None]
+        sqrt_one_minus_alpha_bar = model.sqrt_one_minus_alphas_cumprod[t][:, None, None, None]
         denoised = (noisy_images - sqrt_one_minus_alpha_bar * predicted_noise) / sqrt_alpha_bar
         
         # Convert to numpy for plotting
