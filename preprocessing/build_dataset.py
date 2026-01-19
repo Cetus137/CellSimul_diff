@@ -17,8 +17,8 @@ import json
 from tqdm import tqdm
 import logging
 
-from extract_centres import extract_centres_from_mask, filter_border_cells
-from extract_patches import extract_patches_with_centres, save_patch_dataset
+from .extract_centres import extract_centres_from_mask, filter_border_cells
+from .extract_patches import extract_patches_with_centres, save_patch_dataset
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
