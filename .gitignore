@@ -1,0 +1,67 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (exclude from git, too large)
+data/raw/images/*.tif
+data/raw/images/*.png
+data/raw/masks/*.tif
+data/raw/masks/*.png
+data/processed/
+data/splits/
+
+# Checkpoints and logs
+checkpoints/
+logs/
+runs/
+*.pt
+*.pth
+*.ckpt
+
+# Outputs
+samples/
+outputs/
+results/
+visualizations/
+
+# Temporary files
+*.log
+*.tmp
+.cache/
+test_viz/
+test_viz.py
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# pytest
+.pytest_cache/
+htmlcov/
+.coverage
+*.cover

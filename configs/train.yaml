@@ -1,0 +1,60 @@
+# Training configuration
+
+# Optimization
+optimizer:
+  type: "AdamW"
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+# Learning rate schedule
+scheduler:
+  type: "cosine"  # Options: cosine, constant, linear_warmup
+  warmup_steps: 1000
+  min_lr: 1.0e-6
+
+# Training loop
+training:
+  num_epochs: 500
+  gradient_clip: 1.0
+  
+  # Exponential Moving Average
+  ema:
+    enabled: true
+    decay: 0.9999
+    update_every: 10  # Update EMA every N steps
+  
+  # Mixed precision training
+  mixed_precision: true
+  
+  # Logging and checkpointing
+  log_every: 100  # steps
+  save_every: 5000  # steps
+  validate_every: 2000  # steps
+  num_val_samples: 16  # Number of samples to generate during validation
+  
+  # Visualization
+  visualize: true  # Generate plots and visualizations during training
+  viz_dir: "visualizations"  # Directory for saving visualizations
+  
+  # Checkpoint settings
+  checkpoint_dir: "checkpoints"
+  keep_last_n_checkpoints: 5
+  save_best_only: false  # Save all checkpoints or only best validation
+
+# Validation
+validation:
+  compute_fid: false  # Expensive, enable for final evaluation
+  compute_metrics_every: 5  # epochs
+  
+# Distributed training (if applicable)
+distributed:
+  enabled: false
+  backend: "nccl"
+  
+# Random seed for reproducibility
+random_seed: 42
+
+# Device
+device: "cuda"  # Options: cuda, cpu, mps (for Apple Silicon)
