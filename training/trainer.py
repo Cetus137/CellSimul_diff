@@ -10,7 +10,7 @@ Includes:
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from pathlib import Path
 from typing import Dict, Optional
 import logging
@@ -71,9 +71,10 @@ class EMA:
 
 class Trainer:
     """
-    Trainer for diffusion models.
+    Trainer for diffusion models with small-data optimizations.
     
-    Handles training loop, validation, checkpointing, and logging.
+    Handles training loop, validation, checkpointing, logging, and
+    diagnostic checks for model collapse.
     """
     
     def __init__(
@@ -94,7 +95,10 @@ class Trainer:
         save_every: int = 5000,
         validate_every: int = 2000,
         visualize: bool = True,
-        viz_dir: str = 'visualizations'
+        viz_dir: str = 'visualizations',
+        low_noise_bias: bool = False,
+        low_noise_fraction: float = 0.3,
+        low_noise_weight: float = 3.0
     ):
         """
         Args:
@@ -115,6 +119,9 @@ class Trainer:
             validate_every: Run validation every N steps
             visualize: Enable visualization of training progress
             viz_dir: Directory for saving visualizations
+            low_noise_bias: Bias timestep sampling toward low noise
+            low_noise_fraction: Fraction of timesteps considered low noise
+            low_noise_weight: Weight for low-noise timestep sampling
         """
         self.model = model.to(device)
         self.optimizer = optimizer
@@ -124,6 +131,11 @@ class Trainer:
         self.device = device
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Small-data training settings
+        self.low_noise_bias = low_noise_bias
+        self.low_noise_fraction = low_noise_fraction
+        self.low_noise_weight = low_noise_weight
         
         # Visualization
         self.visualize = visualize
@@ -148,17 +160,29 @@ class Trainer:
         self.step = 0
         self.epoch = 0
         self.best_val_loss = float('inf')
+        
+        # Diagnostic tracking
+        self.timestep_losses = {}  # Track loss by timestep bucket
     
     def train_epoch(self) -> Dict[str, float]:
         """
-        Train for one epoch.
+        Train for one epoch with diagnostic logging.
         
         Returns:
-            metrics: Dictionary of training metrics
+            metrics: Dictionary of training metrics including diagnostics
         """
         self.model.train()
         total_loss = 0.0
+        total_noise_true_norm = 0.0
+        total_noise_pred_norm = 0.0
         num_batches = 0
+        
+        # Track loss by timestep bucket
+        timestep_buckets = {
+            'low': [],    # t < 0.3 * T
+            'mid': [],    # 0.3 * T <= t < 0.7 * T
+            'high': []    # t >= 0.7 * T
+        }
         
         pbar = tqdm(self.train_loader, desc=f"Epoch {self.epoch}")
         
@@ -166,12 +190,42 @@ class Trainer:
             images = images.to(self.device)
             conditioning = conditioning.to(self.device)
             
-            # Forward pass
+            # Forward pass with diagnostics
             if self.mixed_precision:
-                with autocast():
-                    loss = self.model.compute_loss(images, conditioning)
+                with autocast(device_type='cuda' if self.device == 'cuda' else 'cpu'):
+                    loss, diagnostics = self.model.compute_loss(
+                        images,
+                        conditioning,
+                        low_noise_bias=self.low_noise_bias,
+                        low_noise_fraction=self.low_noise_fraction,
+                        low_noise_weight=self.low_noise_weight
+                    )
             else:
-                loss = self.model.compute_loss(images, conditioning)
+                loss, diagnostics = self.model.compute_loss(
+                    images,
+                    conditioning,
+                    low_noise_bias=self.low_noise_bias,
+                    low_noise_fraction=self.low_noise_fraction,
+                    low_noise_weight=self.low_noise_weight
+                )
+            
+            # Track diagnostics
+            total_noise_true_norm += diagnostics['noise_true_norm'].item()
+            total_noise_pred_norm += diagnostics['noise_pred_norm'].item()
+            
+            # Track loss by timestep bucket
+            timesteps = diagnostics['timesteps']
+            T = self.model.timesteps
+            for i, t in enumerate(timesteps):
+                t_val = t.item()
+                loss_val = loss.item()  # Could track per-sample loss if needed
+                
+                if t_val < 0.3 * T:
+                    timestep_buckets['low'].append(loss_val)
+                elif t_val < 0.7 * T:
+                    timestep_buckets['mid'].append(loss_val)
+                else:
+                    timestep_buckets['high'].append(loss_val)
             
             # Backward pass
             self.optimizer.zero_grad()
@@ -223,7 +277,47 @@ class Trainer:
             
             self.step += 1
         
+        # Compute epoch metrics
         avg_loss = total_loss / num_batches
+        avg_noise_true_norm = total_noise_true_norm / num_batches
+        avg_noise_pred_norm = total_noise_pred_norm / num_batches
+        
+        # Compute average loss by timestep bucket
+        bucket_losses = {}
+        for bucket_name, losses in timestep_buckets.items():
+            if len(losses) > 0:
+                bucket_losses[f'loss_{bucket_name}_t'] = sum(losses) / len(losses)
+        
+        # DIAGNOSTIC: Check for collapse (predicted noise << true noise)
+        collapse_ratio = avg_noise_pred_norm / (avg_noise_true_norm + 1e-10)
+        if collapse_ratio < 0.5:
+            logger.warning(
+                f"⚠️  MODEL COLLAPSE DETECTED: ||ε_pred|| = {avg_noise_pred_norm:.4f} "
+                f"<< ||ε_true|| = {avg_noise_true_norm:.4f} (ratio={collapse_ratio:.3f})\n"
+                f"   This indicates the model is predicting near-zero noise everywhere.\n"
+                f"   Likely causes: (1) conditioning scale mismatch, (2) insufficient multi-scale injection,\n"
+                f"   (3) too much classifier-free guidance dropout. Check conditioning normalization."
+            )
+        
+        metrics = {
+            'loss': avg_loss,
+            'noise_true_norm': avg_noise_true_norm,
+            'noise_pred_norm': avg_noise_pred_norm,
+            'collapse_ratio': collapse_ratio,
+            **bucket_losses
+        }
+        
+        # Log detailed diagnostics
+        logger.info(
+            f"Epoch {self.epoch} metrics:\n"
+            f"  Loss: {avg_loss:.4f}\n"
+            f"  ||ε_true||: {avg_noise_true_norm:.4f}\n"
+            f"  ||ε_pred||: {avg_noise_pred_norm:.4f}\n"
+            f"  Collapse ratio: {collapse_ratio:.3f}\n"
+            f"  Loss by timestep: {bucket_losses}"
+        )
+        
+        return metrics
         return {'loss': avg_loss}
     
     @torch.no_grad()
@@ -250,10 +344,10 @@ class Trainer:
             conditioning = conditioning.to(self.device)
             
             if self.mixed_precision:
-                with autocast():
-                    loss = self.model.compute_loss(images, conditioning)
+                with autocast(device_type='cuda' if self.device == 'cuda' else 'cpu'):
+                    loss, _ = self.model.compute_loss(images, conditioning)
             else:
-                loss = self.model.compute_loss(images, conditioning)
+                loss, _ = self.model.compute_loss(images, conditioning)
             
             total_loss += loss.item()
             num_batches += 1

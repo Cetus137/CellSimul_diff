@@ -32,7 +32,9 @@ data/raw/images/*.png
 data/raw/masks/*.tif
 data/raw/masks/*.png
 data/processed/
-data/splits/
+data/splits/raw_store/*.tif
+data/raw
+data/
 
 # Checkpoints and logs
 checkpoints/

@@ -189,16 +189,52 @@ def main():
     # Create data loaders
     logger.info("Creating data loaders...")
     
+    # Check for debug_overfit mode
+    debug_overfit = config['training'].get('debug_overfit', {}).get('enabled', False)
+    
+    if debug_overfit:
+        logger.warning("="*60)
+        logger.warning("DEBUG OVERFIT MODE ENABLED")
+        logger.warning("Training on tiny subset to verify conditioning correctness")
+        logger.warning("="*60)
+        num_patches = config['training']['debug_overfit'].get('num_patches', 32)
+        augment_train = not config['training']['debug_overfit'].get('disable_augmentation', True)
+        p_uncond = 0.0 if config['training']['debug_overfit'].get('disable_cfg', True) else config['diffusion']['cfg'].get('dropout_prob', 0.0)
+    else:
+        num_patches = None  # Use all patches
+        augment_train = config['augmentation'].get('random_flip_horizontal', False)
+        # Use small_data_mode p_uncond if enabled, else CFG config
+        if config['training'].get('small_data_mode', {}).get('enabled', False):
+            p_uncond = config['training']['small_data_mode'].get('p_uncond', 0.0)
+            logger.info(f"Small-data mode enabled: p_uncond={p_uncond}")
+        else:
+            p_uncond = config['diffusion']['cfg'].get('dropout_prob', 0.0)
+    
     train_loader = get_dataloader(
         patches_dir=config['processed_data']['patches_dir'],
         split='train',
         batch_size=config['dataloader']['batch_size'],
         num_workers=config['dataloader']['num_workers'],
         heatmap_sigma=config['preprocessing']['centre_heatmap_sigma'],
-        augment=config['augmentation']['random_flip_horizontal'],  # Enable augmentation
-        p_uncond=config['diffusion']['cfg'].get('dropout_prob', 0.0),
+        augment=augment_train,
+        p_uncond=p_uncond,
         shuffle=True
     )
+    
+    # If debug_overfit, create a subset of the training data
+    if debug_overfit and num_patches is not None:
+        from torch.utils.data import Subset
+        indices = list(range(min(num_patches, len(train_loader.dataset))))
+        subset_dataset = Subset(train_loader.dataset, indices)
+        train_loader = torch.utils.data.DataLoader(
+            subset_dataset,
+            batch_size=config['dataloader']['batch_size'],
+            shuffle=True,
+            num_workers=config['dataloader']['num_workers'],
+            pin_memory=True,
+            drop_last=True
+        )
+        logger.info(f"Debug mode: Using only {len(indices)} patches")
     
     val_loader = get_dataloader(
         patches_dir=config['processed_data']['patches_dir'],
@@ -228,6 +264,15 @@ def main():
     logger.info(f"Optimizer: {config['optimizer']['type']}")
     logger.info(f"Learning rate: {config['optimizer']['learning_rate']:.2e}")
     
+    # Get small-data training parameters
+    small_data_cfg = config['training'].get('small_data_mode', {})
+    low_noise_bias = small_data_cfg.get('low_noise_bias', False)
+    low_noise_fraction = small_data_cfg.get('low_noise_fraction', 0.3)
+    low_noise_weight = small_data_cfg.get('low_noise_weight', 3.0)
+    
+    if low_noise_bias:
+        logger.info(f"Low-noise bias enabled: focusing on t < {low_noise_fraction} * T")
+    
     # Create trainer
     trainer = Trainer(
         model=model,
@@ -246,7 +291,10 @@ def main():
         save_every=config['training']['save_every'],
         validate_every=config['training']['validate_every'],
         visualize=config['training'].get('visualize', True),
-        viz_dir=config['training'].get('viz_dir', 'visualizations')
+        viz_dir=config['training'].get('viz_dir', 'visualizations'),
+        low_noise_bias=low_noise_bias,
+        low_noise_fraction=low_noise_fraction,
+        low_noise_weight=low_noise_weight
     )
     
     # Resume from checkpoint if specified

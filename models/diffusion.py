@@ -372,25 +372,58 @@ class DDPM(nn.Module):
         self,
         x_start: torch.Tensor,
         conditioning: torch.Tensor,
-        t: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+        t: Optional[torch.Tensor] = None,
+        low_noise_bias: bool = False,
+        low_noise_fraction: float = 0.3,
+        low_noise_weight: float = 3.0
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
-        Compute training loss.
+        Compute training loss with optional timestep biasing for small datasets.
         
         Args:
             x_start: Clean images
             conditioning: Conditioning maps
-            t: Optional timesteps (sampled uniformly if None)
+            t: Optional timesteps (sampled if None)
+            low_noise_bias: If True, bias sampling toward low-noise timesteps
+            low_noise_fraction: Fraction of timesteps considered "low noise"
+            low_noise_weight: Weight multiplier for low-noise sampling probability
         
         Returns:
             loss: Scalar loss
+            diagnostics: Dict with keys:
+                - 'noise_true_norm': Mean L2 norm of true noise
+                - 'noise_pred_norm': Mean L2 norm of predicted noise
+                - 'timesteps': Sampled timesteps (for logging)
+        
+        Note:
+            Low-noise bias is CRITICAL for small datasets (~100-1000 patches).
+            It helps the model learn structure before tackling high-noise denoising.
+            Typical usage: enable for first 50-100 epochs, then disable.
         """
         batch_size = x_start.shape[0]
         device = x_start.device
         
         # Sample timesteps if not provided
         if t is None:
-            t = torch.randint(0, self.timesteps, (batch_size,), device=device, dtype=torch.long)
+            if low_noise_bias:
+                # Biased sampling: favor t in [0, low_noise_fraction * T]
+                low_t_threshold = int(self.timesteps * low_noise_fraction)
+                
+                # Create probability weights
+                # Low noise region: weight * uniform, High noise region: uniform
+                low_prob = low_noise_weight / (low_t_threshold + (self.timesteps - low_t_threshold) / low_noise_weight)
+                high_prob = low_prob / low_noise_weight
+                
+                # Sample with bias
+                probs = torch.ones(self.timesteps, device=device)
+                probs[:low_t_threshold] = low_prob
+                probs[low_t_threshold:] = high_prob
+                probs = probs / probs.sum()
+                
+                t = torch.multinomial(probs, batch_size, replacement=True)
+            else:
+                # Uniform sampling
+                t = torch.randint(0, self.timesteps, (batch_size,), device=device, dtype=torch.long)
         
         # Sample noise
         noise = torch.randn_like(x_start)
@@ -411,7 +444,17 @@ class DDPM(nn.Module):
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
         
-        return loss
+        # Compute diagnostics
+        noise_true_norm = torch.norm(noise.view(batch_size, -1), dim=1).mean()
+        noise_pred_norm = torch.norm(predicted_noise.view(batch_size, -1), dim=1).mean()
+        
+        diagnostics = {
+            'noise_true_norm': noise_true_norm.detach(),
+            'noise_pred_norm': noise_pred_norm.detach(),
+            'timesteps': t.detach()
+        }
+        
+        return loss, diagnostics
     
     def _extract(self, a: torch.Tensor, t: torch.Tensor, x_shape: Tuple) -> torch.Tensor:
         """
@@ -456,8 +499,10 @@ if __name__ == "__main__":
     x = torch.randn(2, 1, 64, 64).to(device)
     conditioning = torch.randn(2, 3, 64, 64).to(device)
     
-    loss = ddpm.compute_loss(x, conditioning)
+    loss, diagnostics = ddpm.compute_loss(x, conditioning)
     print(f"Loss: {loss.item():.4f}")
+    print(f"||ε_true||: {diagnostics['noise_true_norm'].item():.4f}")
+    print(f"||ε_pred||: {diagnostics['noise_pred_norm'].item():.4f}")
     
     # Test sampling (only a few steps for speed)
     ddpm.timesteps = 10

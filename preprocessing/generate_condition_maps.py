@@ -10,7 +10,7 @@ This module creates multi-channel conditioning tensors from point locations:
 import numpy as np
 from scipy import ndimage
 from scipy.spatial import distance_matrix, Voronoi
-from typing import Tuple
+from typing import Tuple, Optional
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -35,7 +35,11 @@ def generate_centre_heatmap(
     
     Note:
         Multiple overlapping Gaussians are summed (not max-pooled).
-        Values are NOT normalized to [0, 1] - peak value is 1.0 per Gaussian.
+        Output is clipped to [0, 1] to prevent scale issues.
+        
+        CRITICAL: This ensures heatmap lives on the same scale as other
+        conditioning channels. Unconstrained sums can create large values
+        in dense regions, dominating gradient flow.
     """
     h, w = image_shape
     heatmap = np.zeros((h, w), dtype=np.float32)
@@ -57,13 +61,17 @@ def generate_centre_heatmap(
         # Accumulate (sum overlapping Gaussians)
         heatmap += gaussian
     
+    # Clip to [0, 1] to maintain consistent scale across conditioning channels
+    heatmap = np.clip(heatmap, 0.0, 1.0)
+    
     return heatmap
 
 
 def generate_distance_map(
     centres: np.ndarray,
     image_shape: Tuple[int, int],
-    normalize: bool = True
+    normalize: bool = True,
+    d_max: Optional[float] = None
 ) -> np.ndarray:
     """
     Generate Euclidean distance-to-nearest-centre map.
@@ -71,21 +79,28 @@ def generate_distance_map(
     Args:
         centres: Array of shape (N, 2) with (y, x) coordinates
         image_shape: (H, W) of output map
-        normalize: If True, normalize distances to [0, 1] using max distance
+        normalize: If True, clip and normalize distances to [0, 1]
+        d_max: Maximum distance for clipping. If None, uses 0.5 * mean nearest-neighbor distance
     
     Returns:
-        distance_map: Float array of shape (H, W)
+        distance_map: Float array of shape (H, W) in [0, 1] if normalize=True
     
     Note:
-        This is a continuous field representing distance to the nearest cell centre.
-        Used as a geometric prior for the diffusion model.
+        CRITICAL: Diffusion models are extremely sensitive to input scale.
+        Unnormalized distance maps can dominate gradients and cause:
+        - Collapse toward zero prediction
+        - Ignoring other conditioning channels
+        - Complete failure to learn structure
+        
+        We clip at d_max to ensure inter-cell regions don't saturate the scale.
+        Default d_max = 0.5 * mean_nn_dist emphasizes cell-centered regions.
     """
     h, w = image_shape
     
     # Handle empty centres case
     if len(centres) == 0:
         # Return maximum distance everywhere
-        return np.ones((h, w), dtype=np.float32) * np.sqrt(h**2 + w**2)
+        return np.ones((h, w), dtype=np.float32)
     
     # Create coordinate grids
     y_coords, x_coords = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
@@ -100,9 +115,20 @@ def generate_distance_map(
     # Reshape back to image
     distance_map = min_distances.reshape(h, w).astype(np.float32)
     
-    # Normalize to [0, 1]
-    if normalize and distance_map.max() > 0:
-        distance_map = distance_map / distance_map.max()
+    # Normalize to [0, 1] with clipping
+    if normalize:
+        if d_max is None and len(centres) > 1:
+            # Compute mean nearest-neighbor distance between centres
+            centre_dists = distance_matrix(centres, centres)
+            np.fill_diagonal(centre_dists, np.inf)  # Exclude self-distances
+            mean_nn_dist = np.min(centre_dists, axis=1).mean()
+            d_max = 0.5 * mean_nn_dist  # Half the typical cell spacing
+        elif d_max is None:
+            # Single centre: use quarter of image diagonal
+            d_max = 0.25 * np.sqrt(h**2 + w**2)
+        
+        # Clip and normalize: d_norm = clamp(d / d_max, 0, 1)
+        distance_map = np.clip(distance_map / d_max, 0.0, 1.0)
     
     return distance_map
 
@@ -163,7 +189,10 @@ def generate_boundary_map(
     # Normalize entropy to [0, 1]
     # Maximum entropy for N centres is log(N)
     max_entropy = np.log(len(centres))
-    boundary_map = (entropy / max_entropy).reshape(h, w).astype(np.float32)
+    boundary_map = (entropy / (max_entropy + 1e-10)).reshape(h, w).astype(np.float32)
+    
+    # Ensure [0, 1] range (entropy is always non-negative)
+    boundary_map = np.clip(boundary_map, 0.0, 1.0)
     
     return boundary_map
 
@@ -185,17 +214,23 @@ def generate_conditioning_maps(
     
     Returns:
         conditioning: Float array of shape (3, H, W) with:
-            [0]: Centre heatmap
-            [1]: Distance-to-nearest-centre map (normalized)
-            [2]: Boundary likelihood map
+            [0]: Centre heatmap (clipped to [0, 1])
+            [1]: Distance-to-nearest-centre map (normalized to [0, 1])
+            [2]: Boundary likelihood map (normalized to [0, 1])
     
     Note:
-        This is the critical tensor that conditions the diffusion model.
-        All channels are in [0, 1] range (approximately for heatmap).
+        CRITICAL: All channels are explicitly normalized to [0, 1].
+        This is essential for diffusion models because:
+        - Mismatched scales cause one channel to dominate gradients
+        - The model may ignore poorly-scaled conditioning
+        - Training can collapse (predict zero/noise everywhere)
+        
+        For small datasets (~100-1000 patches), correct normalization
+        is MORE important than adding more data.
     """
     h, w = image_shape
     
-    # Generate individual maps
+    # Generate individual maps (all return [0, 1] range)
     heatmap = generate_centre_heatmap(centres, image_shape, sigma=heatmap_sigma)
     distance_map = generate_distance_map(centres, image_shape, normalize=True)
     boundary_map = generate_boundary_map(centres, image_shape, sigma=boundary_sigma)

@@ -53,6 +53,9 @@ class SinusoidalTimeEmbedding(nn.Module):
 class ResidualBlock(nn.Module):
     """
     Residual block with GroupNorm and time embedding injection.
+    
+    Note: Automatically adjusts num_groups to ensure it divides in_channels/out_channels.
+    This is necessary when conditioning channels are concatenated (e.g., 128 + 3 = 131).
     """
     
     def __init__(
@@ -65,7 +68,17 @@ class ResidualBlock(nn.Module):
     ):
         super().__init__()
         
-        self.norm1 = nn.GroupNorm(num_groups, in_channels)
+        # Adjust num_groups to ensure divisibility
+        # Find largest divisor <= num_groups that divides in_channels
+        groups_in = num_groups
+        while in_channels % groups_in != 0 and groups_in > 1:
+            groups_in -= 1
+        
+        groups_out = num_groups
+        while out_channels % groups_out != 0 and groups_out > 1:
+            groups_out -= 1
+        
+        self.norm1 = nn.GroupNorm(groups_in, in_channels)
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
         
         # Time embedding projection
@@ -74,7 +87,7 @@ class ResidualBlock(nn.Module):
             nn.Linear(time_emb_dim, out_channels)
         )
         
-        self.norm2 = nn.GroupNorm(num_groups, out_channels)
+        self.norm2 = nn.GroupNorm(groups_out, out_channels)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
         
         self.dropout = nn.Dropout(dropout)
@@ -114,6 +127,8 @@ class ResidualBlock(nn.Module):
 class AttentionBlock(nn.Module):
     """
     Self-attention block with multi-head attention.
+    
+    Note: Automatically adjusts num_groups to ensure it divides channels.
     """
     
     def __init__(
@@ -129,7 +144,12 @@ class AttentionBlock(nn.Module):
         
         assert channels % num_heads == 0, "channels must be divisible by num_heads"
         
-        self.norm = nn.GroupNorm(num_groups, channels)
+        # Adjust num_groups to ensure divisibility
+        groups = num_groups
+        while channels % groups != 0 and groups > 1:
+            groups -= 1
+        
+        self.norm = nn.GroupNorm(groups, channels)
         self.qkv = nn.Conv2d(channels, channels * 3, kernel_size=1)
         self.proj = nn.Conv2d(channels, channels, kernel_size=1)
     
@@ -194,9 +214,18 @@ class Upsample(nn.Module):
 
 class ConditionalUNet(nn.Module):
     """
-    U-Net for conditional image generation.
+    U-Net for conditional image generation with MULTI-SCALE conditioning injection.
     
-    Conditioning is injected via channel concatenation at the input.
+    CRITICAL DESIGN:
+    Conditioning is NOT just concatenated at input - it's injected at EVERY scale.
+    This is essential because:
+    - Centre-only conditioning is spatially underdetermined
+    - Different UNet scales need different frequency components from conditioning
+    - Input-only concatenation loses spatial alignment in deep layers
+    
+    For small datasets, multi-scale injection is required for the model to learn
+    structure. Without it, the model ignores conditioning and predicts noise.
+    
     Time embedding is injected into each residual block.
     """
     
@@ -233,6 +262,7 @@ class ConditionalUNet(nn.Module):
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.condition_channels = condition_channels
+        self.num_levels = len(channel_multipliers)
         
         # Time embedding
         self.time_embedding = nn.Sequential(
@@ -242,7 +272,7 @@ class ConditionalUNet(nn.Module):
             nn.Linear(time_emb_dim, time_emb_dim)
         )
         
-        # Initial convolution (concatenate image + conditioning)
+        # Initial convolution (concatenate image + conditioning at input scale)
         self.init_conv = nn.Conv2d(
             in_channels + condition_channels,
             base_channels,
@@ -260,20 +290,23 @@ class ConditionalUNet(nn.Module):
         for level, ch in enumerate(channels):
             blocks = nn.ModuleList()
             
-            for _ in range(num_res_blocks):
+            # First block at each level takes conditioning
+            # Input channels = in_ch (from previous) + condition_channels (multi-scale injection)
+            blocks.append(ResidualBlock(
+                in_ch + condition_channels, ch, time_emb_dim, num_groups, dropout
+            ))
+            in_ch = ch
+            
+            # Remaining residual blocks
+            for _ in range(num_res_blocks - 1):
                 blocks.append(ResidualBlock(
                     in_ch, ch, time_emb_dim, num_groups, dropout
                 ))
                 in_ch = ch
                 
                 # Add attention if at specified resolution
-                # Resolution = image_size / 2^level (approximately)
-                if level < len(attention_resolutions):
-                    expected_res = attention_resolutions[level]
-                    # We don't know the exact resolution here, so we add attention
-                    # at each level and rely on the user to configure correctly
-                    if level >= len(channels) - len(attention_resolutions):
-                        blocks.append(AttentionBlock(ch, num_heads, num_groups))
+                if level >= len(channels) - len(attention_resolutions):
+                    blocks.append(AttentionBlock(ch, num_heads, num_groups))
             
             # Add downsampling (except last level)
             if level < len(channels) - 1:
@@ -281,9 +314,9 @@ class ConditionalUNet(nn.Module):
             
             self.encoder.append(blocks)
         
-        # Bottleneck
+        # Bottleneck (also receives conditioning)
         self.bottleneck = nn.ModuleList([
-            ResidualBlock(channels[-1], channels[-1], time_emb_dim, num_groups, dropout),
+            ResidualBlock(channels[-1] + condition_channels, channels[-1], time_emb_dim, num_groups, dropout),
             AttentionBlock(channels[-1], num_heads, num_groups),
             ResidualBlock(channels[-1], channels[-1], time_emb_dim, num_groups, dropout)
         ])
@@ -295,17 +328,16 @@ class ConditionalUNet(nn.Module):
             blocks = nn.ModuleList()
             out_ch = channels[level]
             
-            # Account for skip connections (concatenation)
+            # Account for skip connections + conditioning at each scale
             for i in range(num_res_blocks + 1):
-                # First block at each level receives skip connection
-                # Skip connection doubles the input channels
+                # First block at each level receives skip connection + conditioning
                 if i == 0:
                     if level < len(channels) - 1:
-                        # After upsampling from previous level + skip connection
-                        in_ch = channels[level + 1] + channels[level]
+                        # After upsampling from previous level + skip connection + conditioning
+                        in_ch = channels[level + 1] + channels[level] + condition_channels
                     else:
-                        # First decoder level, coming from bottleneck + skip
-                        in_ch = channels[level] * 2
+                        # First decoder level, coming from bottleneck + skip + conditioning
+                        in_ch = channels[level] * 2 + condition_channels
                 else:
                     in_ch = out_ch
                 
@@ -324,8 +356,13 @@ class ConditionalUNet(nn.Module):
             self.decoder.append(blocks)
         
         # Final convolution
+        # Adjust num_groups for base_channels
+        final_groups = num_groups
+        while base_channels % final_groups != 0 and final_groups > 1:
+            final_groups -= 1
+        
         self.final_conv = nn.Sequential(
-            nn.GroupNorm(num_groups, base_channels),
+            nn.GroupNorm(final_groups, base_channels),
             nn.SiLU(),
             nn.Conv2d(base_channels, out_channels, kernel_size=3, padding=1)
         )
@@ -337,7 +374,7 @@ class ConditionalUNet(nn.Module):
         conditioning: torch.Tensor
     ) -> torch.Tensor:
         """
-        Forward pass.
+        Forward pass with multi-scale conditioning injection.
         
         Args:
             x: Noisy input image of shape (B, in_channels, H, W)
@@ -350,56 +387,96 @@ class ConditionalUNet(nn.Module):
         # Time embedding
         time_emb = self.time_embedding(t)
         
-        # Concatenate input and conditioning
+        # Concatenate input and conditioning at input resolution
         h = torch.cat([x, conditioning], dim=1)
         
         # Initial convolution
         h = self.init_conv(h)
         
-        # Encoder
+        # Encoder with multi-scale conditioning
         skip_connections = []
+        current_scale = 1  # Track resolution scale (1 = full resolution)
+        
         for level_idx, blocks in enumerate(self.encoder):
-            for block in blocks:
-                if isinstance(block, ResidualBlock):
+            # Downsample conditioning to current scale
+            cond_scaled = F.interpolate(
+                conditioning,
+                size=h.shape[2:],
+                mode='bilinear',
+                align_corners=False
+            )
+            
+            for block_idx, block in enumerate(blocks):
+                if isinstance(block, ResidualBlock) and block_idx == 0:
+                    # First ResBlock at each level: inject conditioning
+                    h = torch.cat([h, cond_scaled], dim=1)
+                    h = block(h, time_emb)
+                elif isinstance(block, ResidualBlock):
                     h = block(h, time_emb)
                 elif isinstance(block, Downsample):
                     # Save skip connection before downsampling
                     skip_connections.append(h)
                     h = block(h)
+                    current_scale *= 2
                 else:
+                    # Attention block
                     h = block(h)
             
             # Save skip for the last encoder level (no downsampling)
             if level_idx == len(self.encoder) - 1:
                 skip_connections.append(h)
         
-        # Bottleneck
-        for block in self.bottleneck:
-            if isinstance(block, ResidualBlock):
+        # Bottleneck with conditioning
+        cond_bottleneck = F.interpolate(
+            conditioning,
+            size=h.shape[2:],
+            mode='bilinear',
+            align_corners=False
+        )
+        
+        for idx, block in enumerate(self.bottleneck):
+            if isinstance(block, ResidualBlock) and idx == 0:
+                # First bottleneck block: inject conditioning
+                h = torch.cat([h, cond_bottleneck], dim=1)
+                h = block(h, time_emb)
+            elif isinstance(block, ResidualBlock):
                 h = block(h, time_emb)
             else:
                 h = block(h)
         
-        # Decoder
+        # Decoder with multi-scale conditioning
         skip_connections = skip_connections[::-1]  # Reverse order
         skip_idx = 0
         
-        for blocks in self.decoder:
+        for level_idx, blocks in enumerate(self.decoder):
+            # Downsample conditioning to current decoder scale
+            cond_scaled = F.interpolate(
+                conditioning,
+                size=h.shape[2:],
+                mode='bilinear',
+                align_corners=False
+            )
+            
             for i, block in enumerate(blocks):
-                # Add skip connection at the start of each level
+                # Add skip connection + conditioning at the start of each level
                 if isinstance(block, ResidualBlock) and i == 0 and skip_idx < len(skip_connections):
                     skip = skip_connections[skip_idx]
                     skip_idx += 1
                     
-                    # Resize skip if needed
-                    if skip.shape != h.shape:
+                    # Resize skip if needed (shouldn't be necessary but defensive)
+                    if skip.shape[2:] != h.shape[2:]:
                         skip = F.interpolate(skip, size=h.shape[2:], mode='nearest')
                     
-                    h = torch.cat([h, skip], dim=1)
-                
-                if isinstance(block, ResidualBlock):
+                    # Concatenate: upsampled features + skip + conditioning
+                    h = torch.cat([h, skip, cond_scaled], dim=1)
                     h = block(h, time_emb)
+                elif isinstance(block, ResidualBlock):
+                    h = block(h, time_emb)
+                elif isinstance(block, Upsample):
+                    h = block(h)
+                    current_scale //= 2
                 else:
+                    # Attention block
                     h = block(h)
         
         # Final convolution

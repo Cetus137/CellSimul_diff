@@ -19,6 +19,29 @@ training:
   num_epochs: 500
   gradient_clip: 1.0
   
+  # Small-data stabilizers (CRITICAL for ~100-1000 patches)
+  # These prevent model collapse and ensure conditioning is learned
+  small_data_mode:
+    enabled: true
+    # Classifier-free guidance dropout probability
+    # Set to 0.0 initially to ensure model learns conditioning
+    # TODO: Re-enable (e.g., 0.1) after initial convergence (~50-100 epochs)
+    p_uncond: 0.0
+    # Bias timestep sampling toward low noise to learn structure first
+    # Samples t from [0, low_noise_fraction * T] with higher probability
+    low_noise_bias: true
+    low_noise_fraction: 0.3  # Focus on t in [0, 0.3*T] initially
+    low_noise_weight: 3.0    # 3x more likely to sample low-noise timesteps
+  
+  # Overfit debug mode: intentionally train on tiny subset to verify conditioning
+  # This is the PRIMARY diagnostic for conditioning correctness
+  # Failure to overfit 16-32 patches indicates architectural bugs, not data issues
+  debug_overfit:
+    enabled: false  # Set to true for debugging
+    num_patches: 32  # Train on only this many patches
+    disable_augmentation: true
+    disable_cfg: true  # Force p_uncond = 0.0
+  
   # Exponential Moving Average
   ema:
     enabled: true

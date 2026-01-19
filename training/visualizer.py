@@ -138,6 +138,12 @@ class TrainingVisualizer:
         """
         model.eval()
         
+        # Unwrap model if it's wrapped in DataParallel or similar
+        if hasattr(model, 'module'):
+            diffusion_model = model.module
+        else:
+            diffusion_model = model
+        
         # Limit to num_samples
         images = images[:num_samples].to(device)
         conditioning = conditioning[:num_samples].to(device)
@@ -145,18 +151,18 @@ class TrainingVisualizer:
         batch_size = images.shape[0]
         
         # Sample random timesteps
-        t = torch.randint(0, model.timesteps // 4, (batch_size,), device=device)  # Use early timesteps for visibility
+        t = torch.randint(0, diffusion_model.timesteps // 4, (batch_size,), device=device)  # Use early timesteps for visibility
         
         # Add noise to images
         noise = torch.randn_like(images)
-        noisy_images = model.q_sample(images, t, noise)
+        noisy_images = diffusion_model.q_sample(images, t, noise)
         
         # Predict noise
-        predicted_noise = model.predict_noise(noisy_images, t, conditioning)
+        predicted_noise = diffusion_model.predict_noise(noisy_images, t, conditioning)
         
         # Compute denoised image (x0 = (x_t - sqrt(1-alpha_bar) * noise) / sqrt(alpha_bar))
-        sqrt_alpha_bar = model.sqrt_alphas_cumprod[t][:, None, None, None]
-        sqrt_one_minus_alpha_bar = model.sqrt_one_minus_alphas_cumprod[t][:, None, None, None]
+        sqrt_alpha_bar = diffusion_model.sqrt_alphas_cumprod[t][:, None, None, None]
+        sqrt_one_minus_alpha_bar = diffusion_model.sqrt_one_minus_alphas_cumprod[t][:, None, None, None]
         denoised = (noisy_images - sqrt_one_minus_alpha_bar * predicted_noise) / sqrt_alpha_bar
         
         # Convert to numpy for plotting

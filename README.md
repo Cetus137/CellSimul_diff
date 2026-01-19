@@ -172,6 +172,62 @@ This will:
 
 ## Training
 
+### Small Dataset Notes
+
+**This model is designed to work with limited data (~100-1000 patches), but requires specific architecture and training choices:**
+
+#### Critical Requirements
+
+1. **Strict Conditioning Normalization** (IMPLEMENTED)
+   - All conditioning channels MUST be normalized to [0, 1]
+   - Centre heatmap: clipped to [0, 1]
+   - Distance map: clipped at `0.5 * mean_nn_distance` and normalized
+   - Boundary map: entropy normalized to [0, 1]
+   - **Why:** Diffusion models are extremely sensitive to scale mismatch. Unnormalized inputs cause one channel to dominate gradients, leading to complete collapse.
+
+2. **Multi-Scale Conditioning Injection** (IMPLEMENTED)
+   - Conditioning is downsampled and concatenated at EVERY UNet scale
+   - Not just at input - also at down blocks, bottleneck, and up blocks
+   - **Why:** Centre-only conditioning is spatially underdetermined. Multi-scale injection ensures spatial alignment at all frequency levels.
+
+3. **Low-Noise Bias in Early Training** (CONFIGURABLE)
+   - Set `training.small_data_mode.low_noise_bias: true` to focus on `t < 0.3 * T` initially
+   - Helps model learn structure before tackling high-noise denoising
+   - Disable after 50-100 epochs once structure is learned
+   - **Why:** Learning boundaries and structure is easier at low noise levels.
+
+4. **Disable Classifier-Free Guidance Initially** (CONFIGURABLE)
+   - Set `training.small_data_mode.p_uncond: 0.0` for first phase
+   - Re-enable (e.g., 0.1) after initial convergence
+   - **Why:** CFG dropout reduces effective training data. Only enable once model can condition properly.
+
+#### Debug Overfit Mode
+
+**PRIMARY DIAGNOSTIC for conditioning correctness:**
+
+```yaml
+# In configs/train.yaml
+training:
+  debug_overfit:
+    enabled: true
+    num_patches: 32
+    disable_augmentation: true
+    disable_cfg: true
+```
+
+- Trains on only 16-32 patches until near-perfect reconstruction
+- **Failure to overfit indicates architectural bugs, NOT data scarcity**
+- Expected outcome: After 10-20 epochs, should see boundary-aligned structure and correct cell spacing
+
+#### Warning Signs of Failure
+
+Monitor diagnostics in training logs:
+- `||ε_pred|| << ||ε_true||` → Model collapse (predicting zero everywhere)
+- Loss stuck high after 50+ epochs → Conditioning ignored
+- Denoised outputs blank/noisy → Normalization or multi-scale injection issue
+
+**Adding more data will NOT fix conditioning bugs.** Fix architecture first, then scale data.
+
 ### Basic Training
 
 ```bash
