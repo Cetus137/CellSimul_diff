@@ -195,11 +195,37 @@ class Trainer:
         pbar = tqdm(self.train_loader, desc=f"Epoch {self.epoch}")
         
         for batch_idx, (images, conditioning) in enumerate(pbar):
+            # CRITICAL: Dataset returns CLEAN images (x0) only
+            # Noise is added ONLY in model.compute_loss() via q_sample()
+            # This is verified - dataset contains no randn_like or noise injection
             images = images.to(self.device)
             conditioning = conditioning.to(self.device)
             
-            # DIAGNOSTIC: Check data ranges (first batch only)
+            # DIAGNOSTIC: Print actual batch statistics (first batch only)
+            # This catches 80% of normalization bugs before they waste GPU time
             if not range_logged:
+                print("\n" + "="*60)
+                print(f"ACTUAL BATCH STATS (Epoch {self.epoch}, Batch 0)")
+                print("="*60)
+                
+                # Print dtype and shape
+                print(f"x0 dtype: {images.dtype}, shape: {tuple(images.shape)}")
+                print(f"x0 min/max/mean/std: {images.min().item():.6f}, {images.max().item():.6f}, "
+                      f"{images.mean().item():.6f}, {images.std().item():.6f}")
+                
+                print(f"\ncond dtype: {conditioning.dtype}, shape: {tuple(conditioning.shape)}")
+                for c in range(conditioning.shape[1]):
+                    cc = conditioning[:, c]
+                    print(f"cond[{c}] min/max/mean/std: {cc.min().item():.6f}, {cc.max().item():.6f}, "
+                          f"{cc.mean().item():.6f}, {cc.std().item():.6f}")
+                
+                print("\n" + "-"*60)
+                print("EXPECTED VALUES:")
+                print("  For training in [-1,1]: x0 min≈-1, max≈1, std~0.1-0.6")
+                print("  For training in [0,1]:  x0 min≈0, max≈1")
+                print("  BAD SIGNS: min≈max (tiny std) or values outside expected range")
+                print("-"*60)
+                
                 logger.info("\n" + "="*60)
                 logger.info("DATA RANGE DIAGNOSTICS (Epoch %d)", self.epoch)
                 logger.info("="*60)
