@@ -16,8 +16,13 @@ from typing import Dict, Optional
 import logging
 from tqdm import tqdm
 import copy
+import sys
 
 from .visualizer import TrainingVisualizer
+
+# Import normalization utilities
+sys.path.append(str(Path(__file__).parent.parent))
+from utils.normalization import check_range
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -184,11 +189,72 @@ class Trainer:
             'high': []    # t >= 0.7 * T
         }
         
+        # Track data range statistics (check once per epoch)
+        range_logged = False
+        
         pbar = tqdm(self.train_loader, desc=f"Epoch {self.epoch}")
         
         for batch_idx, (images, conditioning) in enumerate(pbar):
             images = images.to(self.device)
             conditioning = conditioning.to(self.device)
+            
+            # DIAGNOSTIC: Check data ranges (first batch only)
+            if not range_logged:
+                logger.info("\n" + "="*60)
+                logger.info("DATA RANGE DIAGNOSTICS (Epoch %d)", self.epoch)
+                logger.info("="*60)
+                logger.info("Images (x_start):")
+                logger.info("  min: %.4f, max: %.4f", images.min().item(), images.max().item())
+                logger.info("  mean: %.4f, std: %.4f", images.mean().item(), images.std().item())
+                
+                logger.info("Conditioning channels:")
+                for i in range(conditioning.shape[1]):
+                    logger.info("  Channel %d: min=%.4f, max=%.4f, mean=%.4f",
+                              i, 
+                              conditioning[:, i].min().item(),
+                              conditioning[:, i].max().item(),
+                              conditioning[:, i].mean().item())
+                
+                # SAFETY CHECK: Warn if x_start is out of expected range
+                # Get expected data range from model
+                if hasattr(self.model, 'module'):  # Unwrap DataParallel
+                    data_min = self.model.module.data_min
+                    data_max = self.model.module.data_max
+                else:
+                    data_min = self.model.data_min
+                    data_max = self.model.data_max
+                
+                img_min = images.min().item()
+                img_max = images.max().item()
+                tolerance = 1e-3
+                
+                if img_min < data_min - tolerance or img_max > data_max + tolerance:
+                    logger.warning(
+                        "⚠️  DATA RANGE VIOLATION DETECTED!\n"
+                        f"   x_start range: [{img_min:.6f}, {img_max:.6f}]\n"
+                        f"   Expected range: [{data_min:.6f}, {data_max:.6f}]\n"
+                        f"   Out-of-range by: min={data_min - img_min:.6f}, max={img_max - data_max:.6f}\n"
+                        "   This indicates normalization error in dataset preprocessing.\n"
+                        "   Check utils/normalization.py and dataset loading code."
+                    )
+                else:
+                    logger.info("✓ x_start within expected range [%.4f, %.4f]", data_min, data_max)
+                
+                # Also check conditioning is in [0, 1]
+                cond_min = conditioning.min().item()
+                cond_max = conditioning.max().item()
+                if cond_min < -tolerance or cond_max > 1.0 + tolerance:
+                    logger.warning(
+                        "⚠️  CONDITIONING RANGE VIOLATION!\n"
+                        f"   Conditioning range: [{cond_min:.6f}, {cond_max:.6f}]\n"
+                        f"   Expected: [0.0, 1.0]\n"
+                        "   Check preprocessing/generate_condition_maps.py"
+                    )
+                else:
+                    logger.info("✓ Conditioning within expected range [0.0, 1.0]")
+                
+                logger.info("="*60 + "\n")
+                range_logged = True
             
             # Forward pass with diagnostics
             if self.mixed_precision:

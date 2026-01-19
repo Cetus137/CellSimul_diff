@@ -15,6 +15,11 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional
 import logging
+import sys
+
+# Import normalization utilities
+sys.path.append(str(Path(__file__).parent.parent))
+from utils.normalization import to_zero_one
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +170,10 @@ class TrainingVisualizer:
         sqrt_one_minus_alpha_bar = diffusion_model.sqrt_one_minus_alphas_cumprod[t][:, None, None, None]
         denoised = (noisy_images - sqrt_one_minus_alpha_bar * predicted_noise) / sqrt_alpha_bar
         
+        # Get data range for proper visualization
+        data_min = getattr(diffusion_model, 'data_min', -1.0)
+        data_max = getattr(diffusion_model, 'data_max', 1.0)
+        
         # Convert to numpy for plotting
         images_np = images.cpu().numpy()
         noisy_np = noisy_images.cpu().numpy()
@@ -173,34 +182,43 @@ class TrainingVisualizer:
         denoised_np = denoised.cpu().numpy()
         timesteps_np = t.cpu().numpy()
         
+        # CRITICAL: Convert images/noisy/denoised from training range to display range
+        # Training uses [-1, 1], visualization needs [0, 1]
+        # Formula: (x - data_min) / (data_max - data_min)
+        # For [-1, 1] → [0, 1]: (x + 1) / 2
+        images_display = to_zero_one(images_np, data_min, data_max)
+        noisy_display = to_zero_one(noisy_np, data_min, data_max)
+        denoised_display = to_zero_one(denoised_np, data_min, data_max)
+        # Conditioning is already in [0, 1], no conversion needed
+        
         # Create figure
         fig, axes = plt.subplots(batch_size, 7, figsize=(18, 2.5 * batch_size))
         if batch_size == 1:
             axes = axes[np.newaxis, :]
         
         for i in range(batch_size):
-            # Original image
-            axes[i, 0].imshow(images_np[i, 0], cmap='gray')
+            # Original image (convert to [0,1] for display)
+            axes[i, 0].imshow(images_display[i, 0], cmap='gray', vmin=0, vmax=1)
             axes[i, 0].set_title(f'Original', fontsize=10)
             axes[i, 0].axis('off')
             
-            # Noisy image
-            axes[i, 1].imshow(noisy_np[i, 0], cmap='gray')
+            # Noisy image (convert to [0,1] for display)
+            axes[i, 1].imshow(noisy_display[i, 0], cmap='gray', vmin=0, vmax=1)
             axes[i, 1].set_title(f'Noisy (t={timesteps_np[i]})', fontsize=10)
             axes[i, 1].axis('off')
             
-            # Conditioning - heatmap
-            axes[i, 2].imshow(conditioning_np[i, 0], cmap='hot')
+            # Conditioning - heatmap (already in [0,1])
+            axes[i, 2].imshow(conditioning_np[i, 0], cmap='hot', vmin=0, vmax=1)
             axes[i, 2].set_title('Heatmap', fontsize=10)
             axes[i, 2].axis('off')
             
-            # Conditioning - distance
-            axes[i, 3].imshow(conditioning_np[i, 1], cmap='viridis')
+            # Conditioning - distance (already in [0,1])
+            axes[i, 3].imshow(conditioning_np[i, 1], cmap='viridis', vmin=0, vmax=1)
             axes[i, 3].set_title('Distance', fontsize=10)
             axes[i, 3].axis('off')
             
-            # Conditioning - boundary
-            axes[i, 4].imshow(conditioning_np[i, 2], cmap='plasma')
+            # Conditioning - boundary (already in [0,1])
+            axes[i, 4].imshow(conditioning_np[i, 2], cmap='plasma', vmin=0, vmax=1)
             axes[i, 4].set_title('Boundary', fontsize=10)
             axes[i, 4].axis('off')
             
@@ -209,8 +227,8 @@ class TrainingVisualizer:
             axes[i, 5].set_title('Pred. Noise', fontsize=10)
             axes[i, 5].axis('off')
             
-            # Denoised
-            axes[i, 6].imshow(np.clip(denoised_np[i, 0], 0, 1), cmap='gray')
+            # Denoised (convert to [0,1] for display)
+            axes[i, 6].imshow(denoised_display[i, 0], cmap='gray', vmin=0, vmax=1)
             axes[i, 6].set_title('Denoised', fontsize=10)
             axes[i, 6].axis('off')
         

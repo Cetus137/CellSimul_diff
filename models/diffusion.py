@@ -53,7 +53,9 @@ class DDPM(nn.Module):
         beta_start: float = 0.0001,
         beta_end: float = 0.02,
         prediction_type: str = 'epsilon',
-        loss_type: str = 'l2'
+        loss_type: str = 'l2',
+        data_min: float = -1.0,
+        data_max: float = 1.0
     ):
         """
         Args:
@@ -64,6 +66,16 @@ class DDPM(nn.Module):
             beta_end: Ending beta value
             prediction_type: What the model predicts ('epsilon' for noise)
             loss_type: Loss function ('l1', 'l2', 'huber')
+            data_min: Minimum value of input data range (default: -1.0)
+            data_max: Maximum value of input data range (default: 1.0)
+        
+        Note on data_min/data_max:
+            These parameters define the expected range of input data.
+            - Images are normalized to [data_min, data_max] during preprocessing
+            - Default [-1, 1] is standard for diffusion models
+            - All clamping operations use these bounds to ensure stability
+            - Visualization must convert back from [data_min, data_max] to [0, 1]
+            - CRITICAL: Mismatched ranges cause blank outputs or numerical instability
         """
         super().__init__()
         
@@ -71,6 +83,8 @@ class DDPM(nn.Module):
         self.timesteps = timesteps
         self.prediction_type = prediction_type
         self.loss_type = loss_type
+        self.data_min = data_min
+        self.data_max = data_max
         
         # Create noise schedule
         if beta_schedule == 'linear':
@@ -208,7 +222,7 @@ class DDPM(nn.Module):
         x_start = self.predict_start_from_noise(x_t, t, predicted_noise)
         
         if clip_denoised:
-            x_start = torch.clamp(x_start, -1.0, 1.0)
+            x_start = torch.clamp(x_start, self.data_min, self.data_max)
         
         # Compute posterior mean
         mean_coef1 = self._extract(self.posterior_mean_coef1, t, x_t.shape)
@@ -249,8 +263,8 @@ class DDPM(nn.Module):
         # Sample from N(mean, variance)
         noise = torch.randn_like(x_t)
         
-        # No noise at t=0
-        nonzero_mask = (t != 0).float().view(-1, *([1] * (len(x_t.shape) - 1)))
+        # No noise at t=0 (use tensor-based masking)
+        nonzero_mask = (t_tensor != 0).float().view(-1, *([1] * (len(x_t.shape) - 1)))
         
         return mean + nonzero_mask * torch.sqrt(variance) * noise
     
@@ -350,7 +364,7 @@ class DDPM(nn.Module):
             x_start = self.predict_start_from_noise(x_t, t_tensor, noise)
             
             if clip_denoised:
-                x_start = torch.clamp(x_start, -1.0, 1.0)
+                x_start = torch.clamp(x_start, self.data_min, self.data_max)
             
             # Compute posterior mean
             mean_coef1 = self._extract(self.posterior_mean_coef1, t_tensor, x_t.shape)
@@ -362,7 +376,8 @@ class DDPM(nn.Module):
             
             # Sample
             noise_sample = torch.randn_like(x_t)
-            nonzero_mask = (t != 0).float().view(-1, *([1] * (len(x_t.shape) - 1)))
+            # No noise at t=0 (use tensor-based masking)
+            nonzero_mask = (t_tensor != 0).float().view(-1, *([1] * (len(x_t.shape) - 1)))
             
             x_t = mean + nonzero_mask * torch.sqrt(variance) * noise_sample
         

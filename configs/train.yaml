@@ -49,7 +49,7 @@ training:
     update_every: 10  # Update EMA every N steps
   
   # Mixed precision training
-  mixed_precision: true
+  mixed_precision: false  # Set to true only when using CUDA GPU
   
   # Logging and checkpointing
   log_every: 100  # steps

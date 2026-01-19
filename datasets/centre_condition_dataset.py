@@ -15,6 +15,10 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent / 'preprocessing'))
 from generate_condition_maps import generate_conditioning_maps
 
+# Import normalization utilities
+sys.path.append(str(Path(__file__).parent.parent))
+from utils.normalization import normalize_raw_image, to_minus_one_one
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -124,19 +128,37 @@ class CentreConditionDataset(Dataset):
     
     def _normalize_image(self, image: np.ndarray) -> np.ndarray:
         """
-        Normalize image to [-1, 1] range.
+        Normalize image to [-1, 1] range for diffusion training.
         
-        Assumes input is in [0, 255] or similar positive range.
+        NORMALIZATION PIPELINE FOR UINT16 MICROSCOPY IMAGES:
+        
+        Step 1: Raw uint16 → [0, 1] using PERCENTILE normalization
+            - Computes 1st and 99th percentiles per image
+            - Clips values to [p1, p99] to remove outliers
+            - Scales to [0, 1]: (img - p1) / (p99 - p1)
+            - WHY: Microscopy images rarely use full uint16 range
+                   Dividing by 65535 would compress signal dramatically
+        
+        Step 2: [0, 1] → [-1, 1] for diffusion
+            - Apply: x = 2*x - 1
+            - WHY: DDPM models typically train on [-1, 1] range
+                   This centers the data around zero
+        
+        Conditioning maps stay in [0, 1] range throughout.
+        Only images are converted to [-1, 1].
+        
+        Args:
+            image: Raw image array (uint8, uint16, or float)
+        
+        Returns:
+            Normalized image in [-1, 1] as float32
         """
-        # Normalize to [0, 1]
-        image_min = image.min()
-        image_max = image.max()
+        # Step 1: Normalize raw image to [0, 1] based on dtype
+        # For uint16: uses percentile-based normalization (see utils/normalization.py)
+        image = normalize_raw_image(image)
         
-        if image_max > image_min:
-            image = (image - image_min) / (image_max - image_min)
-        
-        # Scale to [-1, 1]
-        image = image * 2.0 - 1.0
+        # Step 2: Convert [0, 1] → [-1, 1] for diffusion training
+        image = to_minus_one_one(image)
         
         return image
     

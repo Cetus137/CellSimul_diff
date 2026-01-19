@@ -37,8 +37,8 @@ splits:
 # Data loading
 dataloader:
   batch_size: 8
-  num_workers: 4
-  pin_memory: true
+  num_workers: 0  # Set to 0 on macOS to avoid hanging, use 4+ on Linux with GPU
+  pin_memory: false  # Disable on CPU
   shuffle_train: true
   
 # Data augmentation (applied during training)
