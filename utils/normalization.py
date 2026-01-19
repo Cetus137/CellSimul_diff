@@ -85,6 +85,14 @@ def normalize_raw_image(img: np.ndarray,
             Raw uint16: min=200, p1=450, p99=7800, max=12500
             After percentile norm: p1→0.0, p99→1.0, outliers clipped
             After /65535: entire signal compressed to [0.007, 0.191]
+        
+        FLOAT32/FLOAT64 HANDLING:
+        - If already in [0, 1]: returned as-is
+        - If arbitrary range (e.g., [300, 1000]): percentile normalization applied
+        - Examples:
+            float32 [0.0, 0.95]: → unchanged (already normalized)
+            float32 [300, 1000]: → percentile norm → [0, 1]
+            float32 [-0.5, 2.0]: → percentile norm → [0, 1]
     """
     # Convert to float32 first
     img_float = img.astype(np.float32)
@@ -113,8 +121,31 @@ def normalize_raw_image(img: np.ndarray,
         return img_normalized
     
     elif img.dtype in [np.float32, np.float64]:
-        # Assume already normalized, clip to [0, 1]
-        return np.clip(img_float, 0.0, 1.0)
+        # For float images, check if already normalized or needs percentile scaling
+        img_min = np.min(img_float)
+        img_max = np.max(img_float)
+        
+        if img_min >= 0.0 and img_max <= 1.0:
+            # Already in [0, 1], just return as-is
+            return img_float
+        else:
+            # Float with arbitrary range (e.g., [300, 1000])
+            # Apply percentile normalization like uint16
+            p_low = np.percentile(img_float, percentile_low)
+            p_high = np.percentile(img_float, percentile_high)
+            
+            # Avoid division by zero
+            if p_high - p_low < 1e-6:
+                # Uniform image, map to middle gray
+                return np.full_like(img_float, 0.5)
+            
+            # Clip to percentile range
+            img_clipped = np.clip(img_float, p_low, p_high)
+            
+            # Scale to [0, 1]
+            img_normalized = (img_clipped - p_low) / (p_high - p_low)
+            
+            return img_normalized
     
     else:
         raise ValueError(f"Unsupported image dtype: {img.dtype}")
