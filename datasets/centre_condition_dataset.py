@@ -91,7 +91,10 @@ class CentreConditionDataset(Dataset):
         centres_file = self.patches_dir / f"{base_name}_centres.npy"
         
         # Load image and centres
-        image = np.load(image_file).astype(np.float32)
+        # CRITICAL: Do NOT convert image dtype here!
+        # normalize_raw_image() needs to see the original dtype (uint16)
+        # to apply correct normalization strategy
+        image = np.load(image_file)  # Keep original dtype
         centres = np.load(centres_file).astype(np.float32)
         
         # Handle single-channel images
