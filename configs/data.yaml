@@ -2,8 +2,8 @@
 
 # Raw data paths
 raw_data:
-  images_dir: "data/raw/images"
-  masks_dir: "data/raw/masks"
+  images_dir: "/content/drive/MyDrive/cellsimul_diff/data_128//raw/images_full"
+  masks_dir: "/content/drive/MyDrive/cellsimul_diff/data_128//raw/masks_full"
   image_suffix: ".tif"
   mask_prefix: "masks_"  # Mask files have 'masks_' prefix
 
@@ -23,8 +23,8 @@ preprocessing:
   
 # Processed data paths
 processed_data:
-  patches_dir: "data/processed/patches"
-  metadata_dir: "data/processed/metadata"
+  patches_dir: "/content/drive/MyDrive/cellsimul_diff/data_128/processed_full"
+  metadata_dir: "/content/drive/MyDrive/cellsimul_diff/data_128/metadata_full"
   
 # Dataset splits
 splits:
