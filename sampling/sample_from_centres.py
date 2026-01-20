@@ -117,15 +117,29 @@ def sample_from_centres(
         image: Generated image of shape (H, W)
     """
     # Generate conditioning maps
+    # CRITICAL: Use same parameters as training!
     conditioning = generate_conditioning_maps(
         centres,
         image_shape,
         heatmap_sigma=heatmap_sigma,
-        boundary_sigma=boundary_sigma
+        boundary_sigma=boundary_sigma,
+        boundary_method='entropy',  # Must match training
+        distance_percentile=95.0    # CRITICAL: Must match training
     )  # (3, H, W)
     
     # Convert to tensor and add batch dimension
     conditioning = torch.from_numpy(conditioning).unsqueeze(0).float().to(device)  # (1, 3, H, W)
+    
+    # DIAGNOSTIC: Print conditioning statistics
+    print(f"\n{'='*60}")
+    print(f"INFERENCE CONDITIONING DIAGNOSTICS")
+    print(f"{'='*60}")
+    print(f"Conditioning shape: {conditioning.shape}")
+    for c in range(conditioning.shape[1]):
+        c_data = conditioning[:, c]
+        print(f"Channel {c}: min={c_data.min():.4f}, max={c_data.max():.4f}, "
+              f"mean={c_data.mean():.4f}, std={c_data.std():.4f}")
+    print(f"{'='*60}\n")
     
     # Sample
     with torch.no_grad():
@@ -144,9 +158,20 @@ def sample_from_centres(
     # Convert to numpy and denormalize
     image = samples[0, 0].cpu().numpy()  # (H, W)
     
+    # DIAGNOSTIC: Print output statistics BEFORE denormalization
+    print(f"\n{'='*60}")
+    print(f"INFERENCE OUTPUT DIAGNOSTICS")
+    print(f"{'='*60}")
+    print(f"Raw output (before denorm): min={image.min():.4f}, max={image.max():.4f}, "
+          f"mean={image.mean():.4f}, std={image.std():.4f}")
+    
     # Denormalize from [-1, 1] to [0, 1]
     image = (image + 1.0) / 2.0
     image = np.clip(image, 0, 1)
+    
+    print(f"After denorm to [0,1]: min={image.min():.4f}, max={image.max():.4f}, "
+          f"mean={image.mean():.4f}, std={image.std():.4f}")
+    print(f"{'='*60}\n")
     
     return image
 

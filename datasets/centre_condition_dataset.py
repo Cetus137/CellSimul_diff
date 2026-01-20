@@ -116,7 +116,9 @@ class CentreConditionDataset(Dataset):
             centres,
             image_shape,
             heatmap_sigma=self.heatmap_sigma,
-            boundary_sigma=self.boundary_sigma
+            boundary_sigma=self.boundary_sigma,
+            boundary_method='entropy',  # Robust soft-assignment method
+            distance_percentile=95.0    # CRITICAL: Percentile normalization for distance map
         )  # (3, H, W)
         
         # Apply augmentations if enabled
