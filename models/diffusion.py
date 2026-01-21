@@ -437,6 +437,84 @@ class DDPM(nn.Module):
 
         return x_t
     
+    
+    @torch.no_grad()
+    def sample_pair_same_noise(
+        self,
+        cond_A: torch.Tensor,
+        cond_B: torch.Tensor,
+        guidance_scale: float = 0.0,
+        out_channels: int = 1,
+        seed: int = 0,
+        clip_denoised: bool = True
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Generate a pair of samples using the EXACT SAME per-step noise sequence.
+        - cond_A, cond_B: per-frame conditioning (B, cond_ch, H, W)
+        - guidance_scale: CFG strength; if >0, uncond conditioning is zeros
+        - out_channels: number of output image channels per frame (1 for grayscale)
+        - seed: integer seed used to create the per-step RNG sequence (recreated for each run)
+        Returns:
+            (frame_A, frame_B) each (B, out_channels, H, W) on same device as conds
+        Notes:
+            - This does NOT change model weights. Ensure ddpm.eval() and ddpm.model.eval() before calling.
+            - This guarantees identical per-step randomness between the two reverse runs.
+        """
+        device = cond_A.device
+        assert cond_A.shape[0] == cond_B.shape[0], "Batch sizes of cond_A and cond_B must match"
+        B, _, H, W = cond_A.shape
+        out_shape = (B, out_channels, H, W)
+
+        # Create a single starting x_T (we broadcast pixel-wise for stronger matching)
+        x_T_base = torch.randn((B, 1, H, W), device=device)
+        x_T = x_T_base.repeat(1, out_channels, 1, 1)  # identical pixel-wise start across channels
+
+        # Unconditional conditioning for CFG (zeros)
+        uncond = torch.zeros_like(cond_A)
+
+        # Helper: run reverse using a generator seeded with `seed` so draws are reproducible
+        def _reverse_with_seed(xT, conditioning, seed_local):
+            # Recreate the generator so the noise stream is the same for each call with same seed
+            gen = torch.Generator(device=device).manual_seed(int(seed_local))
+            x = xT.clone()
+            for t in reversed(range(self.timesteps)):
+                t_tensor = torch.full((B,), t, device=device, dtype=torch.long)
+
+                # Predict guided or unguided epsilon
+                if guidance_scale != 0.0:
+                    eps_cond = self.predict_noise(x, t_tensor, conditioning)
+                    eps_uncond = self.predict_noise(x, t_tensor, uncond)
+                    eps = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+                else:
+                    eps = self.predict_noise(x, t_tensor, conditioning)
+
+                # Predict x_start and clamp
+                x_start = self.predict_start_from_noise(x, t_tensor, eps)
+                if clip_denoised:
+                    x_start = torch.clamp(x_start, self.data_min, self.data_max)
+
+                # Posterior mean & variance
+                mean_coef1 = self._extract(self.posterior_mean_coef1, t_tensor, x.shape)
+                mean_coef2 = self._extract(self.posterior_mean_coef2, t_tensor, x.shape)
+                mean = mean_coef1 * x_start + mean_coef2 * x
+
+                var = self._extract(self.posterior_variance, t_tensor, x.shape)
+
+                # Draw noise deterministically from gen
+                noise_sample = torch.randn(out_shape, device=device, generator=gen)
+
+                nonzero_mask = (t_tensor != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
+                x = mean + nonzero_mask * torch.sqrt(var) * noise_sample
+
+            return x
+
+        # Run two reverse processes with the SAME seed and same x_T -> identical per-step randomness
+        frameA = _reverse_with_seed(x_T, cond_A, seed)
+        frameB = _reverse_with_seed(x_T, cond_B, seed)
+
+        return frameA, frameB    
+
+
     def compute_loss(
         self,
         x_start: torch.Tensor,
