@@ -383,6 +383,60 @@ class DDPM(nn.Module):
         
         return x_t
     
+
+    @torch.no_grad()
+    def reverse_from_xT(
+        self,
+        x_T: torch.Tensor,
+        conditioning: torch.Tensor,
+        guidance_scale: float = 0.0,
+        clip_denoised: bool = True,
+        uncond_conditioning: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Run the reverse diffusion starting from provided x_T.
+        - x_T: tensor shape (B, C, H, W) starting noise (can be shared between runs)
+        - conditioning: (B, cond_ch, H, W)
+        - guidance_scale: classifier-free guidance scale (0 => no guidance)
+        - uncond_conditioning: if None, uses zeros_like(conditioning)
+        Returns:
+            x_0: final denoised sample tensor (B, C, H, W)
+        """
+        device = x_T.device
+        x_t = x_T.clone()
+
+        if uncond_conditioning is None:
+            uncond_conditioning = torch.zeros_like(conditioning)
+
+        for t in tqdm(reversed(range(self.timesteps)), desc='Reverse from x_T', total=self.timesteps):
+            batch_size = x_t.shape[0]
+            t_tensor = torch.full((batch_size,), t, device=device, dtype=torch.long)
+
+            if guidance_scale != 0.0:
+                # Predict noise with and without conditioning
+                noise_cond = self.predict_noise(x_t, t_tensor, conditioning)
+                noise_uncond = self.predict_noise(x_t, t_tensor, uncond_conditioning)
+                noise = noise_uncond + guidance_scale * (noise_cond - noise_uncond)
+            else:
+                noise = self.predict_noise(x_t, t_tensor, conditioning)
+
+            # Predict x_start and mean/variance using the chosen noise (same as sample_with_cfg)
+            x_start = self.predict_start_from_noise(x_t, t_tensor, noise)
+            if clip_denoised:
+                x_start = torch.clamp(x_start, self.data_min, self.data_max)
+
+            mean_coef1 = self._extract(self.posterior_mean_coef1, t_tensor, x_t.shape)
+            mean_coef2 = self._extract(self.posterior_mean_coef2, t_tensor, x_t.shape)
+            mean = mean_coef1 * x_start + mean_coef2 * x_t
+
+            variance = self._extract(self.posterior_variance, t_tensor, x_t.shape)
+            # sample noise for the step
+            noise_sample = torch.randn_like(x_t)
+            nonzero_mask = (t_tensor != 0).float().view(-1, *([1] * (len(x_t.shape) - 1)))
+            x_t = mean + nonzero_mask * torch.sqrt(variance) * noise_sample
+
+        return x_t
+    
     def compute_loss(
         self,
         x_start: torch.Tensor,
