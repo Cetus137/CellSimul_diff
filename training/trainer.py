@@ -301,6 +301,14 @@ class Trainer:
                     low_noise_weight=self.low_noise_weight
                 )
             
+            # Check for NaN/Inf before continuing
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.error(
+                    f"NaN/Inf loss detected at step {self.step}, epoch {self.epoch}! "
+                    f"Skipping batch to prevent training collapse."
+                )
+                continue
+            
             # Track diagnostics
             total_noise_true_norm += diagnostics['noise_true_norm'].item()
             total_noise_pred_norm += diagnostics['noise_pred_norm'].item()
@@ -548,7 +556,7 @@ class Trainer:
         Args:
             path: Path to checkpoint file
         """
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])

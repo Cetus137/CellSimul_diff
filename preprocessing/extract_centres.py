@@ -61,6 +61,10 @@ def extract_centres_from_mask(
         
         centres.append(centroid)
     
+    # Ensure proper shape even when empty (0, 2) instead of (0,)
+    if len(centres) == 0:
+        return np.empty((0, 2), dtype=np.float32)
+    
     return np.array(centres, dtype=np.float32)
 
 
@@ -82,6 +86,10 @@ def filter_border_cells(
     Returns:
         filtered_centres: Array of valid centres
     """
+    # Handle empty input
+    if len(centres) == 0:
+        return centres
+    
     h, w = image_shape
     
     # Boolean mask for valid centres

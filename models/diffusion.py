@@ -314,6 +314,122 @@ class DDPM(nn.Module):
         return x_t
     
     @torch.no_grad()
+    def sample_correlated(
+        self,
+        conditioning: torch.Tensor,
+        x_T: torch.Tensor,
+        seed_shared: int,
+        seed_unique: int,
+        rho: float = 0.95,
+        temporal_smoothness: float = 0.0,
+        unique_noise_prev: Optional[torch.Tensor] = None,
+        guidance_scale: float = 0.0,
+        clip_denoised: bool = True
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Generate samples with temporally correlated noise and smooth evolution.
+        
+        Uses two noise generators:
+        - shared: Same seed across frames (correlated component)
+        - unique: Different seed per frame with AR(1) temporal smoothing
+        
+        Noise mixing: noise = sqrt(rho) * shared + sqrt(1-rho) * unique
+        Temporal smoothing: unique[t] = β * unique[t-1] + sqrt(1-β²) * innovation[t]
+        
+        Args:
+            conditioning: Conditioning maps of shape (B, C_cond, H, W)
+            x_T: Initial noise tensor (same x_T reused for correlation)
+            seed_shared: Seed for shared noise generator
+            seed_unique: Seed for unique noise generator
+            rho: Spatial correlation coefficient (0-1), higher = more similar frames
+            temporal_smoothness: AR(1) coefficient (0-1) for smooth unique noise evolution
+                0.0 = independent per frame (current behavior)
+                0.7 = moderate smoothing
+                0.9 = very smooth
+            unique_noise_prev: Previous frame's unique noise for AR(1) process
+            guidance_scale: CFG guidance strength (0 = no CFG)
+            clip_denoised: Clip predicted x_0 to data range
+        
+        Returns:
+            samples: Generated images of shape (B, C, H, W)
+            unique_noise_state: Final unique noise state for next frame
+        """
+        device = conditioning.device
+        batch_size, _, h, w = conditioning.shape
+        out_shape = x_T.shape
+        
+        # Create generators for reproducible noise
+        gen_shared = torch.Generator(device=device).manual_seed(int(seed_shared))
+        gen_unique = torch.Generator(device=device).manual_seed(int(seed_unique))
+        
+        # Compute mixing coefficients
+        sqrt_rho = torch.sqrt(torch.tensor(max(0.0, float(rho))))
+        sqrt_1_minus_rho = torch.sqrt(torch.tensor(max(0.0, 1.0 - float(rho))))
+        
+        # Compute AR(1) coefficients for temporal smoothing
+        beta = float(temporal_smoothness)
+        sqrt_1_minus_beta_sq = torch.sqrt(torch.tensor(max(0.0, 1.0 - beta**2)))
+        
+        x = x_T.clone()
+        
+        # Create unconditional conditioning for CFG
+        if guidance_scale != 0.0:
+            uncond = torch.zeros_like(conditioning)
+        
+        # Track unique noise for AR(1) process and final state
+        unique_noise_state = None
+        
+        # Reverse diffusion with correlated and temporally smooth noise
+        for t in reversed(range(self.timesteps)):
+            t_tensor = torch.full((batch_size,), t, device=device, dtype=torch.long)
+            
+            # Predict noise (with optional CFG)
+            if guidance_scale != 0.0:
+                eps_cond = self.predict_noise(x, t_tensor, conditioning)
+                eps_uncond = self.predict_noise(x, t_tensor, uncond)
+                eps = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+            else:
+                eps = self.predict_noise(x, t_tensor, conditioning)
+            
+            # Predict x_0
+            x_start = self.predict_start_from_noise(x, t_tensor, eps)
+            if clip_denoised:
+                x_start = torch.clamp(x_start, self.data_min, self.data_max)
+            
+            # Compute posterior mean
+            mean_coef1 = self._extract(self.posterior_mean_coef1, t_tensor, x.shape)
+            mean_coef2 = self._extract(self.posterior_mean_coef2, t_tensor, x.shape)
+            mean = mean_coef1 * x_start + mean_coef2 * x
+            
+            # Get variance
+            variance = self._extract(self.posterior_variance, t_tensor, x.shape)
+            
+            # Generate correlated and temporally smooth noise
+            if t > 0:
+                noise_shared = torch.randn(out_shape, device=device, generator=gen_shared)
+                innovation = torch.randn(out_shape, device=device, generator=gen_unique)
+                
+                # Apply AR(1) process to unique noise
+                if unique_noise_prev is not None and beta > 0:
+                    # unique[t] = β * unique[t-1] + sqrt(1-β²) * innovation
+                    noise_unique = beta * unique_noise_prev + sqrt_1_minus_beta_sq * innovation
+                else:
+                    # First frame or no smoothing
+                    noise_unique = innovation
+                
+                # Store for next timestep
+                unique_noise_state = noise_unique.clone()
+                
+                # Mix shared and unique components
+                noise = sqrt_rho * noise_shared + sqrt_1_minus_rho * noise_unique
+                
+                x = mean + torch.sqrt(variance) * noise
+            else:
+                x = mean
+        
+        return x, unique_noise_state
+    
+    @torch.no_grad()
     def sample_with_cfg(
         self,
         conditioning: torch.Tensor,

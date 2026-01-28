@@ -43,6 +43,12 @@ def process_image_mask_pair(
     # Load image and mask
     image = tifffile.imread(str(image_path))
     mask = tifffile.imread(str(mask_path))
+
+    print(image.shape, mask.shape)
+
+    #squash channel dimension if single channel
+    image = np.squeeze(image)
+    mask = np.squeeze(mask)
     
     if image is None or mask is None:
         logger.warning(f"Failed to load {image_path} or {mask_path}, skipping")
@@ -122,9 +128,17 @@ def build_dataset(config_path: str = "configs/data.yaml") -> None:
     all_patches = []
     for image_path in tqdm(image_files, desc="Processing images"):
         # Construct corresponding mask path
-        # Assumes mask filename is {mask_prefix}{image_name}
-        mask_prefix = config['raw_data'].get('mask_prefix', 'masks_')
-        mask_name = mask_prefix + image_path.name
+        # Supports both mask_prefix (e.g., masks_image.tif) and mask_suffix (e.g., image_masks.tif)
+        if 'mask_suffix' in config['raw_data']:
+            # New suffix pattern: image_name -> image_name_masks.tif
+            mask_suffix = config['raw_data']['mask_suffix']
+            base_name = image_path.stem  # Remove .tif extension
+            mask_name = base_name + mask_suffix
+        else:
+            # Legacy prefix pattern: image_name -> masks_image_name
+            mask_prefix = config['raw_data'].get('mask_prefix', 'masks_')
+            mask_name = mask_prefix + image_path.name
+        
         mask_path = masks_dir / mask_name
         
         if not mask_path.exists():

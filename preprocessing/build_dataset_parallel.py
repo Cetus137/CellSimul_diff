@@ -126,11 +126,20 @@ def build_dataset_parallel(
     logger.info(f"Found {len(image_files)} images to process")
     
     # Prepare image-mask pairs
-    mask_prefix = config['raw_data'].get('mask_prefix', 'masks_')
+    # Supports both mask_prefix (e.g., masks_image.tif) and mask_suffix (e.g., image_masks.tif)
     pairs = []
     
     for image_path in image_files:
-        mask_name = mask_prefix + image_path.name
+        if 'mask_suffix' in config['raw_data']:
+            # New suffix pattern: image_name -> image_name_masks.tif
+            mask_suffix = config['raw_data']['mask_suffix']
+            base_name = image_path.stem  # Remove .tif extension
+            mask_name = base_name + mask_suffix
+        else:
+            # Legacy prefix pattern: image_name -> masks_image_name
+            mask_prefix = config['raw_data'].get('mask_prefix', 'masks_')
+            mask_name = mask_prefix + image_path.name
+        
         mask_path = masks_dir / mask_name
         
         if not mask_path.exists():
