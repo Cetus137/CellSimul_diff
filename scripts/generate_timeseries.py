@@ -17,6 +17,7 @@ from typing import Optional, Tuple, List
 import numpy as np
 import torch
 import tifffile
+from skimage import exposure
 from tqdm import tqdm
 
 # Add parent directory to path
@@ -120,6 +121,7 @@ def generate_timeseries(
     min_distance: float = 12.0,
     noise_correlation: float = 0.0,
     temporal_smoothness: float = 0.0,
+    match_histograms: bool = False,
     use_cfg: bool = True,
     guidance_scale: float = 3.0,
     output_dir: str = './timeseries',
@@ -145,6 +147,8 @@ def generate_timeseries(
             0.0 = independent noise per frame
             0.7 = moderate temporal smoothing
             0.9 = very smooth evolution
+        match_histograms: Whether to apply histogram matching post-processing
+            Uses first frame as reference to ensure consistent intensity distributions
         use_cfg: Whether to use classifier-free guidance
         guidance_scale: CFG scale if use_cfg=True
         output_dir: Directory to save results
@@ -244,6 +248,24 @@ def generate_timeseries(
     # Save complete time-series as single (T, Y, X) TIFF stack
     if save_stack:
         stack = np.stack(images_list, axis=0)  # Shape: (T, Y, X)
+        
+        # Apply histogram matching if requested
+        if match_histograms and num_timepoints > 1:
+            logger.info("Applying histogram matching to ensure consistent intensity distributions...")
+            reference_frame = stack[0]  # Use first frame as reference
+            matched_stack = np.zeros_like(stack)
+            matched_stack[0] = reference_frame
+            
+            for t in range(1, num_timepoints):
+                matched_stack[t] = exposure.match_histograms(
+                    stack[t], 
+                    reference_frame,
+                    channel_axis=None
+                )
+            
+            stack = matched_stack
+            logger.info("Histogram matching complete")
+        
         stack_filename = os.path.join(output_dir, f"{prefix}_stack.tiff")
         
         # Save as 32-bit float to preserve original data range [-1, 1]
@@ -341,6 +363,13 @@ Examples:
         default=0.0,
         help='AR(1) coefficient for smooth noise evolution, 0-1 (default: 0.0, no smoothing). '
              'Higher values create smoother temporal transitions. Recommended: 0.7 for moderate, 0.9 for very smooth.'
+    )
+    
+    parser.add_argument(
+        '--match_histograms',
+        action='store_true',
+        help='Apply histogram matching post-processing to match all frames to first frame. '
+             'Ensures consistent intensity distributions across time (default: False)'
     )
     
     # Initial centres configuration
@@ -566,6 +595,7 @@ Examples:
             min_distance=args.min_distance,
             noise_correlation=args.noise_correlation,
             temporal_smoothness=args.temporal_smoothness,
+            match_histograms=args.match_histograms,
             use_cfg=use_cfg,
             guidance_scale=args.guidance_scale,
             output_dir=args.output_dir,

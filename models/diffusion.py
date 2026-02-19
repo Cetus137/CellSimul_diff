@@ -360,7 +360,18 @@ class DDPM(nn.Module):
         
         # Create generators for reproducible noise
         gen_shared = torch.Generator(device=device).manual_seed(int(seed_shared))
-        gen_unique = torch.Generator(device=device).manual_seed(int(seed_unique))
+        
+        # For temporal smoothing: blend previous and current unique seeds
+        # This creates correlation in the entire random sequence
+        beta = float(temporal_smoothness)
+        if unique_noise_prev is not None and beta > 0:
+            # Extract a representative value from previous noise to mix with seed
+            # This creates deterministic correlation
+            prev_seed_contribution = int(unique_noise_prev.abs().mean().item() * 1e6) % 1000000
+            blended_seed = int(beta * prev_seed_contribution + (1 - beta) * seed_unique)
+            gen_unique = torch.Generator(device=device).manual_seed(blended_seed)
+        else:
+            gen_unique = torch.Generator(device=device).manual_seed(int(seed_unique))
         
         # Compute mixing coefficients
         sqrt_rho = torch.sqrt(torch.tensor(max(0.0, float(rho))))
@@ -370,14 +381,24 @@ class DDPM(nn.Module):
         beta = float(temporal_smoothness)
         sqrt_1_minus_beta_sq = torch.sqrt(torch.tensor(max(0.0, 1.0 - beta**2)))
         
+        # Initialize unique noise state for this frame
+        # Apply AR(1) once at the start, not at every denoising step
+        if unique_noise_prev is not None and beta > 0:
+            # Create deterministic innovation for initial state
+            initial_innovation = torch.randn(out_shape, device=device, generator=gen_unique)
+            initial_unique_base = beta * unique_noise_prev + sqrt_1_minus_beta_sq * initial_innovation
+        else:
+            initial_unique_base = None
+        
         x = x_T.clone()
         
         # Create unconditional conditioning for CFG
         if guidance_scale != 0.0:
             uncond = torch.zeros_like(conditioning)
         
-        # Track unique noise for AR(1) process and final state
-        unique_noise_state = None
+        # Track unique noise state for next frame
+        unique_noise_state_for_next_frame = None
+        first_step_done = False
         
         # Reverse diffusion with correlated and temporally smooth noise
         for t in reversed(range(self.timesteps)):
@@ -407,18 +428,19 @@ class DDPM(nn.Module):
             # Generate correlated and temporally smooth noise
             if t > 0:
                 noise_shared = torch.randn(out_shape, device=device, generator=gen_shared)
-                innovation = torch.randn(out_shape, device=device, generator=gen_unique)
                 
-                # Apply AR(1) process to unique noise
-                if unique_noise_prev is not None and beta > 0:
-                    # unique[t] = β * unique[t-1] + sqrt(1-β²) * innovation
-                    noise_unique = beta * unique_noise_prev + sqrt_1_minus_beta_sq * innovation
+                # Use initial_unique_base for first step, then fresh innovations
+                if not first_step_done and initial_unique_base is not None:
+                    noise_unique = initial_unique_base
+                    unique_noise_state_for_next_frame = noise_unique.clone()
+                    first_step_done = True
                 else:
-                    # First frame or no smoothing
+                    innovation = torch.randn(out_shape, device=device, generator=gen_unique)
                     noise_unique = innovation
-                
-                # Store for next timestep
-                unique_noise_state = noise_unique.clone()
+                    # Store the first unique noise for next frame
+                    if not first_step_done:
+                        unique_noise_state_for_next_frame = noise_unique.clone()
+                        first_step_done = True
                 
                 # Mix shared and unique components
                 noise = sqrt_rho * noise_shared + sqrt_1_minus_rho * noise_unique
@@ -427,7 +449,7 @@ class DDPM(nn.Module):
             else:
                 x = mean
         
-        return x, unique_noise_state
+        return x, unique_noise_state_for_next_frame
     
     @torch.no_grad()
     def sample_with_cfg(
