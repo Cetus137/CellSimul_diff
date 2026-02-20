@@ -103,7 +103,9 @@ class Trainer:
         viz_dir: str = 'visualizations',
         low_noise_bias: bool = False,
         low_noise_fraction: float = 0.3,
-        low_noise_weight: float = 3.0
+        low_noise_weight: float = 3.0,
+        n_geom_channels: Optional[int] = None,
+        geom_channel_names: Optional[list] = None,
     ):
         """
         Args:
@@ -127,6 +129,8 @@ class Trainer:
             low_noise_bias: Bias timestep sampling toward low noise
             low_noise_fraction: Fraction of timesteps considered low noise
             low_noise_weight: Weight for low-noise timestep sampling
+            n_geom_channels: Number of geometry conditioning channels (None = auto-detect)
+            geom_channel_names: Display names for geometry channels (e.g. ['Heatmap', 'Distance'])
         """
         self.model = model.to(device)
         self.optimizer = optimizer
@@ -141,7 +145,11 @@ class Trainer:
         self.low_noise_bias = low_noise_bias
         self.low_noise_fraction = low_noise_fraction
         self.low_noise_weight = low_noise_weight
-        
+
+        # Conditioning layout (for visualizer)
+        self.n_geom_channels = n_geom_channels
+        self.geom_channel_names = geom_channel_names
+
         # Visualization
         self.visualize = visualize
         self.visualizer = TrainingVisualizer(save_dir=viz_dir) if visualize else None
@@ -418,51 +426,38 @@ class Trainer:
         )
         
         return metrics
-        return {'loss': avg_loss}
-    
+
     @torch.no_grad()
     def validate(self) -> Dict[str, float]:
         """
-        Run validation.
-        
+        Run validation with the raw model weights.
+
         Returns:
-            metrics: Dictionary of validation metrics
+            metrics: Dict with 'loss' (raw model val loss).
         """
         if self.val_loader is None:
             return {}
-        
+
         self.model.eval()
-        total_loss = 0.0
-        num_batches = 0
-        
-        # Use EMA model for validation if available
-        if self.use_ema:
-            self.ema.apply_shadow()
-        
-        for images, conditioning in tqdm(self.val_loader, desc="Validation"):
-            images = images.to(self.device)
+        total = 0.0
+        n = 0
+        for images, conditioning in tqdm(self.val_loader, desc="Validation", leave=False):
+            images       = images.to(self.device)
             conditioning = conditioning.to(self.device)
-            
             if self.mixed_precision:
                 with autocast(device_type='cuda' if self.device == 'cuda' else 'cpu'):
                     loss, _ = self.model.compute_loss(images, conditioning)
             else:
                 loss, _ = self.model.compute_loss(images, conditioning)
-            
-            total_loss += loss.item()
-            num_batches += 1
-        
-        # Restore model parameters
-        if self.use_ema:
-            self.ema.restore()
-        
-        avg_loss = total_loss / num_batches
-        
-        # Update best model
+            total += loss.item()
+            n += 1
+        avg_loss = total / n
+
+        # Save best checkpoint based on val loss
         if avg_loss < self.best_val_loss:
             self.best_val_loss = avg_loss
             self.save_checkpoint(name='best.pt')
-        
+
         return {'loss': avg_loss}
     
     def train(self, num_epochs: int):
@@ -489,9 +484,9 @@ class Trainer:
             val_loss = None
             if self.val_loader is not None:
                 val_metrics = self.validate()
-                val_loss = val_metrics['loss']
+                val_loss    = val_metrics['loss']
                 logger.info(f"Epoch {epoch} - Val loss: {val_loss:.4f}")
-            
+
             # Visualize
             if self.visualize:
                 # Add metrics
@@ -513,7 +508,9 @@ class Trainer:
                     conditioning=sample_conditioning,
                     epoch=epoch,
                     device=self.device,
-                    num_samples=min(4, sample_images.shape[0])
+                    num_samples=min(4, sample_images.shape[0]),
+                    n_geom_channels=self.n_geom_channels,
+                    geom_channel_names=self.geom_channel_names,
                 )
         
         logger.info("Training completed!")

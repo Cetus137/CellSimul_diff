@@ -472,44 +472,44 @@ Examples:
     
     # Configuration files
     parser.add_argument(
-        '--model_config',
+        '--config',
         type=str,
-        default='configs/model.yaml',
-        help='Path to model config (default: configs/model.yaml)'
-    )
-    
-    parser.add_argument(
-        '--data_config',
-        type=str,
-        default='configs/data.yaml',
-        help='Path to data config (default: configs/data.yaml)'
+        default='configs/frame1.yaml',
+        help='Path to unified config (default: configs/frame1.yaml)'
     )
     
     # System
     parser.add_argument(
         '--device',
         type=str,
-        default='cuda' if torch.cuda.is_available() else 'cpu',
-        help='Device to use (default: cuda if available)'
+        default=None,
+        help='Device to use (overrides config)'
     )
     
     parser.add_argument(
         '--seed',
         type=int,
         default=None,
-        help='Random seed for reproducibility (default: None)'
+        help='Random seed (overrides config random_seed)'
     )
     
     args = parser.parse_args()
+
+    # Load config to resolve defaults for device and seed
+    import yaml
+    with open(args.config, 'r') as f:
+        _cfg = yaml.safe_load(f)
+    device = args.device or _cfg.get('device', 'cuda')
+    seed   = args.seed   if args.seed is not None else _cfg.get('random_seed', None)
     
     # Validate arguments
     if args.method == 'from_file' and args.centres_file is None:
         parser.error("--centres_file is required when method=from_file")
     
     # Set random seed
-    if args.seed is not None:
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
+    if seed is not None:
+        np.random.seed(seed)
+        torch.manual_seed(seed)
     
     # Log configuration
     use_cfg = not args.no_cfg
@@ -523,7 +523,7 @@ Examples:
     if args.directional_bias is not None:
         logger.info(f"Directional bias: dy={args.directional_bias[0]}, dx={args.directional_bias[1]}")
     logger.info(f"Output directory: {args.output_dir}")
-    logger.info(f"Device: {args.device}")
+    logger.info(f"Device: {device}")
     logger.info(f"Classifier-free guidance: {use_cfg}")
     if use_cfg:
         logger.info(f"  Guidance scale: {args.guidance_scale}")
@@ -545,9 +545,8 @@ Examples:
         # Initialize synthesizer
         synthesizer = CellSynthesizer(
             checkpoint_path=args.checkpoint,
-            model_config=args.model_config,
-            data_config=args.data_config,
-            device=args.device
+            config=args.config,
+            device=device
         )
         
         # Generate or load initial centres
@@ -603,7 +602,7 @@ Examples:
             save_centres=not args.no_save_centres,
             save_visualization=not args.no_visualization,
             save_stack=not args.no_stack,
-            seed=args.seed
+            seed=seed
         )
         
         logger.info("="*70)

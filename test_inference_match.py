@@ -91,7 +91,7 @@ def test_sampling_quality(checkpoint_path='checkpoints/best.pt'):
         return
     
     # Load model
-    with open('configs/model.yaml', 'r') as f:
+    with open('configs/frame1.yaml', 'r') as f:
         config = yaml.safe_load(f)
     
     unet = ConditionalUNet(
@@ -210,7 +210,7 @@ def test_timestep_consistency():
     print("TEST 3: Timestep Schedule Consistency")
     print("="*60)
     
-    with open('configs/model.yaml', 'r') as f:
+    with open('configs/frame1.yaml', 'r') as f:
         config = yaml.safe_load(f)
     
     print(f"Configured timesteps: {config['diffusion']['timesteps']}")

@@ -46,7 +46,8 @@ class CentreConditionDataset(Dataset):
         heatmap_sigma: float = 3.0,
         boundary_sigma: float = 2.0,
         normalize_images: bool = True,
-        augment: bool = False
+        augment: bool = False,
+        active_channels: Optional[dict] = None
     ):
         """
         Initialize dataset.
@@ -58,6 +59,9 @@ class CentreConditionDataset(Dataset):
             boundary_sigma: Temperature for boundary soft-assignment
             normalize_images: Normalize images to [-1, 1]
             augment: Apply random augmentations (flips, rotations)
+            active_channels: Dict of booleans controlling which conditioning
+                channels to generate, e.g. {'heatmap': True, 'distance': True,
+                'boundary': False}.  None = all three active (default).
         """
         self.patches_dir = Path(patches_dir) / split
         self.split = split
@@ -65,6 +69,7 @@ class CentreConditionDataset(Dataset):
         self.boundary_sigma = boundary_sigma
         self.normalize_images = normalize_images
         self.augment = augment and (split == 'train')  # Only augment training
+        self.active_channels = active_channels  # None = use all three
         
         # Find all patches
         self.patch_files = sorted(self.patches_dir.glob("*_image.npy"))
@@ -118,8 +123,9 @@ class CentreConditionDataset(Dataset):
             heatmap_sigma=self.heatmap_sigma,
             boundary_sigma=self.boundary_sigma,
             boundary_method='entropy',  # Robust soft-assignment method
-            distance_percentile=95.0    # CRITICAL: Percentile normalization for distance map
-        )  # (3, H, W)
+            distance_percentile=95.0,   # CRITICAL: Percentile normalization for distance map
+            active_channels=self.active_channels
+        )
         
         # Apply augmentations if enabled
         if self.augment:
@@ -248,7 +254,8 @@ def get_dataloader(
     boundary_sigma: float = 2.0,
     augment: bool = False,
     p_uncond: float = 0.0,
-    shuffle: Optional[bool] = None
+    shuffle: Optional[bool] = None,
+    active_channels: Optional[dict] = None
 ) -> torch.utils.data.DataLoader:
     """
     Create a DataLoader for the specified split.
@@ -263,6 +270,8 @@ def get_dataloader(
         augment: Apply data augmentation
         p_uncond: Probability of dropping conditioning (for CFG)
         shuffle: Whether to shuffle data (defaults to True for train, False otherwise)
+        active_channels: Dict of booleans for which conditioning channels to use.
+            None = all three active (default).
     
     Returns:
         dataloader: PyTorch DataLoader
@@ -274,7 +283,8 @@ def get_dataloader(
         heatmap_sigma=heatmap_sigma,
         boundary_sigma=boundary_sigma,
         normalize_images=True,
-        augment=augment
+        augment=augment,
+        active_channels=active_channels
     )
     
     # Wrap with conditional dropout if p_uncond > 0

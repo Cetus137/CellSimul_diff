@@ -152,36 +152,36 @@ Examples:
     
     # Config files
     parser.add_argument(
-        '--model_config',
+        '--config',
         type=str,
-        default='configs/model.yaml',
-        help='Path to model config (default: configs/model.yaml)'
-    )
-    
-    parser.add_argument(
-        '--data_config',
-        type=str,
-        default='configs/data_hpc.yaml',
-        help='Path to data config (default: configs/data_hpc.yaml)'
+        default='configs/frame1.yaml',
+        help='Path to unified config (default: configs/frame1.yaml)'
     )
     
     # Other
     parser.add_argument(
         '--device',
         type=str,
-        default='cuda',
+        default=None,
         choices=['cuda', 'cpu'],
-        help='Device to use (default: cuda)'
+        help='Device to use (overrides config)'
     )
     
     parser.add_argument(
         '--seed',
         type=int,
-        default=42,
-        help='Random seed (default: 42)'
+        default=None,
+        help='Random seed (overrides config random_seed)'
     )
     
     args = parser.parse_args()
+
+    # Load config to resolve defaults
+    import yaml
+    with open(args.config, 'r') as f:
+        _cfg = yaml.safe_load(f)
+    device = args.device or _cfg.get('device', 'cuda')
+    seed   = args.seed   if args.seed is not None else _cfg.get('random_seed', 42)
     
     # Handle CFG flag
     use_cfg = args.use_cfg and not args.no_cfg
@@ -194,7 +194,7 @@ Examples:
     logger.info(f"Method: {args.method}")
     logger.info(f"Number of samples: {args.num_samples}")
     logger.info(f"Output directory: {args.output_dir}")
-    logger.info(f"Device: {args.device}")
+    logger.info(f"Device: {device}")
     logger.info(f"Classifier-free guidance: {use_cfg}")
     if use_cfg:
         logger.info(f"  Guidance scale: {args.guidance_scale}")
@@ -215,9 +215,8 @@ Examples:
         # Initialize synthesizer
         synthesizer = CellSynthesizer(
             checkpoint_path=args.checkpoint,
-            model_config=args.model_config,
-            data_config=args.data_config,
-            device=args.device
+            config=args.config,
+            device=device
         )
         
         # Prepare centre generation parameters
@@ -240,7 +239,7 @@ Examples:
             method=args.method,
             use_cfg=use_cfg,
             guidance_scale=args.guidance_scale,
-            seed=args.seed,
+            seed=seed,
             **centre_kwargs
         )
         

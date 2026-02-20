@@ -60,7 +60,7 @@ class TrainingVisualizer:
     ):
         """
         Add metrics for the current epoch.
-        
+
         Args:
             epoch: Current epoch number
             train_loss: Training loss
@@ -69,7 +69,7 @@ class TrainingVisualizer:
         self.epochs.append(epoch)
         self.train_losses.append(train_loss)
         if val_loss is not None:
-            self.val_losses.append(val_loss)
+            self.val_losses.append((epoch, val_loss))
     
     def plot_loss_curves(self, save_name: str = 'loss_curves.png'):
         """
@@ -87,9 +87,10 @@ class TrainingVisualizer:
         # Plot train loss
         plt.plot(self.epochs, self.train_losses, 'b-', label='Train Loss', linewidth=2)
         
-        # Plot val loss if available
+        # Plot val loss
         if len(self.val_losses) > 0:
-            plt.plot(self.epochs, self.val_losses, 'r-', label='Val Loss', linewidth=2)
+            ve, vl = zip(*self.val_losses)
+            plt.plot(ve, vl, 'r-', label='Val Loss', linewidth=2)
         
         plt.xlabel('Epoch', fontsize=12)
         plt.ylabel('Loss', fontsize=12)
@@ -99,9 +100,9 @@ class TrainingVisualizer:
         
         # Use log scale if losses vary significantly
         if len(self.train_losses) > 0:
-            max_loss = max(self.train_losses)
-            min_loss = min(self.train_losses)
-            if max_loss / min_loss > 10:
+            all_losses = list(self.train_losses)
+            if self.val_losses: all_losses += [l for _, l in self.val_losses]
+            if max(all_losses) / (min(all_losses) + 1e-10) > 10:
                 plt.yscale('log')
         
         plt.tight_layout()
@@ -120,7 +121,9 @@ class TrainingVisualizer:
         epoch: int,
         device: str = 'cpu',
         num_samples: int = 4,
-        save_name: Optional[str] = None
+        save_name: Optional[str] = None,
+        n_geom_channels: Optional[int] = None,
+        geom_channel_names: Optional[list] = None,
     ):
         """
         Visualize model inputs and outputs.
@@ -191,46 +194,81 @@ class TrainingVisualizer:
         denoised_display = to_zero_one(denoised_np, data_min, data_max)
         # Conditioning is already in [0, 1], no conversion needed
         
-        # Create figure
-        fig, axes = plt.subplots(batch_size, 7, figsize=(18, 2.5 * batch_size))
+        # Detect frame-2 mode: last channel is I_t (previous frame image).
+        # frame2 conditioning = [heatmap?, distance?, boundary?, I_t]
+        # We identify it by checking if the model has condition_channels > n_geom_only,
+        # but simplest heuristic: frame2 always has I_t as the LAST channel, stored
+        # separately.  We infer it from shape vs known geom-channel names.
+        _ALL_GEOM = [
+            ('Heatmap',  'hot'),
+            ('Distance', 'viridis'),
+            ('Boundary', 'plasma'),
+        ]
+        total_cond = conditioning_np.shape[1]
+
+        # Determine how many channels are geometry maps vs image (I_t).
+        # If n_geom_channels is supplied (by frame-2 trainer), use it directly.
+        # Otherwise fall back to heuristic: geometry ≤ 3, extras are I_t.
+        if n_geom_channels is not None:
+            n_geom = n_geom_channels
+        else:
+            n_geom = min(total_cond, len(_ALL_GEOM))
+        is_frame2 = total_cond > n_geom  # has one or more image channels appended
+
+        # Build per-channel (name, colormap) list for the active geometry channels
+        if geom_channel_names is not None:
+            cmaps = [cm for (_, cm) in _ALL_GEOM]
+            GEOM_CHANNELS = list(zip(geom_channel_names, cmaps[:len(geom_channel_names)]))
+        else:
+            GEOM_CHANNELS = _ALL_GEOM[:n_geom]
+
+        # ncols = [I_t] + image + noisy + geom_channels + pred_noise + denoised
+        ncols = (1 if is_frame2 else 0) + 2 + n_geom + 2
+        fig, axes = plt.subplots(batch_size, ncols, figsize=(2.5 * ncols, 2.5 * batch_size))
         if batch_size == 1:
             axes = axes[np.newaxis, :]
-        
+
         for i in range(batch_size):
-            # Original image (convert to [0,1] for display)
-            axes[i, 0].imshow(images_display[i, 0], cmap='gray', vmin=0, vmax=1)
-            axes[i, 0].set_title(f'Original', fontsize=10)
-            axes[i, 0].axis('off')
-            
-            # Noisy image (convert to [0,1] for display)
-            axes[i, 1].imshow(noisy_display[i, 0], cmap='gray', vmin=0, vmax=1)
-            axes[i, 1].set_title(f'Noisy (t={timesteps_np[i]})', fontsize=10)
-            axes[i, 1].axis('off')
-            
-            # Conditioning - heatmap (already in [0,1])
-            axes[i, 2].imshow(conditioning_np[i, 0], cmap='hot', vmin=0, vmax=1)
-            axes[i, 2].set_title('Heatmap', fontsize=10)
-            axes[i, 2].axis('off')
-            
-            # Conditioning - distance (already in [0,1])
-            axes[i, 3].imshow(conditioning_np[i, 1], cmap='viridis', vmin=0, vmax=1)
-            axes[i, 3].set_title('Distance', fontsize=10)
-            axes[i, 3].axis('off')
-            
-            # Conditioning - boundary (already in [0,1])
-            axes[i, 4].imshow(conditioning_np[i, 2], cmap='plasma', vmin=0, vmax=1)
-            axes[i, 4].set_title('Boundary', fontsize=10)
-            axes[i, 4].axis('off')
-            
-            # Predicted noise
-            axes[i, 5].imshow(predicted_noise_np[i, 0], cmap='gray', vmin=-3, vmax=3)
-            axes[i, 5].set_title('Pred. Noise', fontsize=10)
-            axes[i, 5].axis('off')
-            
-            # Denoised (convert to [0,1] for display)
-            axes[i, 6].imshow(denoised_display[i, 0], cmap='gray', vmin=0, vmax=1)
-            axes[i, 6].set_title('Denoised', fontsize=10)
-            axes[i, 6].axis('off')
+            col = 0
+
+            # --- Column 0 (frame-2 only): I_t  previous frame --------
+            if is_frame2:
+                it_display = to_zero_one(conditioning_np[i, -1:], data_min, data_max)
+                axes[i, col].imshow(it_display[0], cmap='gray', vmin=0, vmax=1)
+                axes[i, col].set_title('I_t (prev)', fontsize=10)
+                axes[i, col].axis('off')
+                col += 1
+
+            # --- Target image -----------------------------------------
+            img_title = 'I_{t+1} (target)' if is_frame2 else 'Image (target)'
+            axes[i, col].imshow(images_display[i, 0], cmap='gray', vmin=0, vmax=1)
+            axes[i, col].set_title(img_title, fontsize=10)
+            axes[i, col].axis('off')
+            col += 1
+
+            # --- Noisy ------------------------------------------------
+            axes[i, col].imshow(noisy_display[i, 0], cmap='gray', vmin=0, vmax=1)
+            axes[i, col].set_title(f'Noisy (t={timesteps_np[i]})', fontsize=10)
+            axes[i, col].axis('off')
+            col += 1
+
+            # --- Geometry conditioning maps (however many are active) --
+            for ch_idx, (ch_name, ch_cmap) in enumerate(GEOM_CHANNELS):
+                axes[i, col].imshow(conditioning_np[i, ch_idx], cmap=ch_cmap, vmin=0, vmax=1)
+                axes[i, col].set_title(ch_name, fontsize=10)
+                axes[i, col].axis('off')
+                col += 1
+
+            # --- Predicted noise --------------------------------------
+            axes[i, col].imshow(predicted_noise_np[i, 0], cmap='gray', vmin=-3, vmax=3)
+            axes[i, col].set_title('Pred. Noise', fontsize=10)
+            axes[i, col].axis('off')
+            col += 1
+
+            # --- Denoised ---------------------------------------------
+            axes[i, col].imshow(denoised_display[i, 0], cmap='gray', vmin=0, vmax=1)
+            axes[i, col].set_title('Denoised', fontsize=10)
+            axes[i, col].axis('off')
         
         plt.suptitle(f'Model Outputs - Epoch {epoch}', fontsize=14, fontweight='bold', y=0.98)
         plt.tight_layout()

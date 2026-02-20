@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 def load_model(
     checkpoint_path: str,
-    config_path: str = "configs/model.yaml",
+    config_path: str = "configs/frame1.yaml",
     device: str = 'cuda'
 ) -> DDPM:
     """
@@ -45,10 +45,16 @@ def load_model(
         config = yaml.safe_load(f)
     
     # Create model
+    conditioning_cfg = config['unet'].get('conditioning')
+    if conditioning_cfg is not None:
+        condition_channels = sum(1 for v in conditioning_cfg.values() if v)
+    else:
+        condition_channels = config['unet']['condition_channels']
+
     unet = ConditionalUNet(
         in_channels=config['unet']['in_channels'],
         out_channels=config['unet']['out_channels'],
-        condition_channels=config['unet']['condition_channels'],
+        condition_channels=condition_channels,
         base_channels=config['unet']['base_channels'],
         channel_multipliers=config['unet']['channel_multipliers'],
         num_res_blocks=config['unet']['num_res_blocks'],
@@ -98,7 +104,8 @@ def sample_from_centres(
     boundary_sigma: float = 2.0,
     use_cfg: bool = True,
     guidance_scale: float = 3.0,
-    device: str = 'cuda'
+    device: str = 'cuda',
+    active_channels: Optional[dict] = None
 ) -> np.ndarray:
     """
     Generate image from cell centres.
@@ -112,6 +119,9 @@ def sample_from_centres(
         use_cfg: Use classifier-free guidance
         guidance_scale: CFG guidance scale
         device: Device to sample on
+        active_channels: Dict of booleans for which conditioning channels to
+            use, e.g. {'heatmap': True, 'distance': True, 'boundary': False}.
+            None (default) = all three active.
     
     Returns:
         image: Generated image of shape (H, W)
@@ -124,8 +134,9 @@ def sample_from_centres(
         heatmap_sigma=heatmap_sigma,
         boundary_sigma=boundary_sigma,
         boundary_method='entropy',  # Must match training
-        distance_percentile=95.0    # CRITICAL: Must match training
-    )  # (3, H, W)
+        distance_percentile=95.0,   # CRITICAL: Must match training
+        active_channels=active_channels
+    )
     
     # Convert to tensor and add batch dimension
     conditioning = torch.from_numpy(conditioning).unsqueeze(0).float().to(device)  # (1, 3, H, W)
@@ -304,7 +315,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Sample from trained diffusion model")
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to model checkpoint')
-    parser.add_argument('--config', type=str, default='configs/model.yaml', help='Model config')
+    parser.add_argument('--config', type=str, default='configs/frame1.yaml', help='Model config')
     parser.add_argument('--num_samples', type=int, default=4, help='Number of samples to generate')
     parser.add_argument('--num_cells', type=int, default=20, help='Number of cells per sample')
     parser.add_argument('--image_size', type=int, default=256, help='Image size')

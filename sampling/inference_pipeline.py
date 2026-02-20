@@ -45,8 +45,7 @@ class CellSynthesizer:
     def __init__(
         self,
         checkpoint_path: str,
-        model_config: str = "configs/model.yaml",
-        data_config: str = "configs/data_hpc.yaml",
+        config: str = "configs/frame1.yaml",
         device: str = "cuda"
     ):
         """
@@ -54,32 +53,39 @@ class CellSynthesizer:
         
         Args:
             checkpoint_path: Path to model checkpoint
-            model_config: Path to model configuration
-            data_config: Path to data configuration (for preprocessing params)
+            config: Path to unified config (data + model + training settings)
             device: Device to run inference on
         """
         self.device = device if torch.cuda.is_available() else "cpu"
         if device == "cuda" and self.device == "cpu":
             logger.warning("CUDA requested but not available, using CPU")
         
-        # Load configurations
-        with open(model_config, 'r') as f:
-            self.model_config = yaml.safe_load(f)
-        
-        with open(data_config, 'r') as f:
-            self.data_config = yaml.safe_load(f)
+        # Load configuration (single unified config file)
+        with open(config, 'r') as f:
+            self.cfg = yaml.safe_load(f)
+        # Aliases so the rest of the class can reference either section
+        self.model_config = self.cfg
+        self.data_config = self.cfg
         
         # Load model
         logger.info(f"Loading model from {checkpoint_path}...")
-        self.model = load_model(checkpoint_path, model_config, self.device)
+        self.model = load_model(checkpoint_path, config, self.device)
         self.model.eval()
         
         # Get preprocessing parameters
         self.image_size = self.data_config['preprocessing']['patch_size']
         self.heatmap_sigma = self.data_config['preprocessing']['centre_heatmap_sigma']
-        
+
+        # Resolve active conditioning channels from model config
+        conditioning_cfg = self.model_config.get('unet', {}).get('conditioning')
+        if conditioning_cfg is not None:
+            self.active_channels = {k: bool(v) for k, v in conditioning_cfg.items()}
+        else:
+            self.active_channels = None  # all three active
+
         logger.info(f"Synthesizer initialized on {self.device}")
         logger.info(f"Image size: {self.image_size}x{self.image_size}")
+        logger.info(f"Active conditioning channels: {self.active_channels}")
     
     def generate_centres(
         self,
@@ -171,7 +177,8 @@ class CellSynthesizer:
             heatmap_sigma=self.heatmap_sigma,
             boundary_sigma=2.0,
             boundary_method='entropy',
-            distance_percentile=95.0
+            distance_percentile=95.0,
+            active_channels=self.active_channels
         )
         
         return conditioning
@@ -209,7 +216,8 @@ class CellSynthesizer:
             boundary_sigma=2.0,
             use_cfg=use_cfg,
             guidance_scale=guidance_scale,
-            device=self.device
+            device=self.device,
+            active_channels=self.active_channels
         )
         
         # Convert from [-1, 1] to [0, 1] for visualization

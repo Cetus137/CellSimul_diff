@@ -68,11 +68,8 @@ def main():
     if patches_dir.exists() and not args.force:
         logger.warning(f"Processed data already exists at {patches_dir}")
         logger.warning("Use --force to reprocess")
-        response = input("Continue anyway? (y/n): ")
-        if response.lower() != 'y':
-            logger.info("Preprocessing cancelled")
-            return
-    
+        return
+
     # Run preprocessing pipeline
     logger.info("="*60)
     logger.info("Starting preprocessing pipeline")
@@ -87,13 +84,6 @@ def main():
     
     try:
         build_dataset(str(config_path))
-        logger.info("="*60)
-        logger.info("Preprocessing completed successfully!")
-        logger.info("="*60)
-        logger.info("Next steps:")
-        logger.info("  1. Review the generated patches")
-        logger.info("  2. Adjust configuration if needed")
-        logger.info("  3. Run: python scripts/train.py")
     except Exception as e:
         logger.error(f"Preprocessing failed: {e}")
         raise

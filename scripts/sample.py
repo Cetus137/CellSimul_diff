@@ -41,16 +41,10 @@ def main():
         help='Path to model checkpoint'
     )
     parser.add_argument(
-        '--model_config',
+        '--config',
         type=str,
-        default='configs/model.yaml',
-        help='Path to model configuration'
-    )
-    parser.add_argument(
-        '--data_config',
-        type=str,
-        default='configs/data.yaml',
-        help='Path to data configuration'
+        default='configs/frame1.yaml',
+        help='Path to unified config'
     )
     parser.add_argument(
         '--centres',
@@ -144,7 +138,7 @@ def main():
     logger.info("Loading model...")
     model = load_model(
         checkpoint_path=args.checkpoint,
-        config_path=args.model_config,
+        config_path=args.config,
         device=device
     )
     model.eval()
@@ -167,7 +161,7 @@ def main():
             centres_list.append(centres)
     
     # Load data config for conditioning parameters
-    with open(args.data_config, 'r') as f:
+    with open(args.config, 'r') as f:
         data_config = yaml.safe_load(f)
     
     heatmap_sigma = data_config['preprocessing']['centre_heatmap_sigma']

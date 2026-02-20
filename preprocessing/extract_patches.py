@@ -45,6 +45,7 @@ def extract_patches_with_centres(
     """
     h, w = image.shape[:2]
     patches = []
+    n_skipped_min_cells = 0
     
     # Compute patch grid positions
     top_positions = range(0, h - patch_size + 1, stride)
@@ -71,9 +72,10 @@ def extract_patches_with_centres(
             )
             
             patch_centres = centres[in_patch].copy()
-            
+
             # Filter by minimum cell count
             if len(patch_centres) < min_cells:
+                n_skipped_min_cells += 1
                 continue
             
             # Convert centres to patch-relative coordinates
@@ -88,8 +90,7 @@ def extract_patches_with_centres(
                 'num_cells': len(patch_centres)
             })
     
-    logger.info(f"Extracted {len(patches)} patches from {h}x{w} image")
-    return patches
+    return patches, n_skipped_min_cells
 
 
 def save_patch_dataset(
@@ -248,7 +249,7 @@ if __name__ == "__main__":
         sys.exit(1)
     
     # Extract patches
-    patches = extract_patches_with_centres(
+    patches, _ = extract_patches_with_centres(
         image,
         centres,
         patch_size=256,

@@ -4,16 +4,14 @@ Build complete dataset from raw microscopy images and masks.
 This orchestrates the full preprocessing pipeline:
 1. Extract centres from all masks
 2. Extract patches from all images
-3. Create train/val/test splits
-4. Save dataset index for efficient loading
+3. Create train/val/test split subdirectories
 """
 
 import numpy as np
 import tifffile
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict
 import yaml
-import json
 from tqdm import tqdm
 import logging
 
@@ -38,22 +36,13 @@ def process_image_mask_pair(
         config: Configuration dictionary
     
     Returns:
-        patches: List of patch dictionaries
+        (patches, n_skipped): patches is a list of patch dicts; n_skipped is the
+        count of candidate patches dropped by the min_cells filter.
     """
     # Load image and mask
-    image = tifffile.imread(str(image_path))
-    mask = tifffile.imread(str(mask_path))
+    image = np.squeeze(tifffile.imread(str(image_path)))
+    mask = np.squeeze(tifffile.imread(str(mask_path)))
 
-    print(image.shape, mask.shape)
-
-    #squash channel dimension if single channel
-    image = np.squeeze(image)
-    mask = np.squeeze(mask)
-    
-    if image is None or mask is None:
-        logger.warning(f"Failed to load {image_path} or {mask_path}, skipping")
-        return []
-    
     # Extract centres from mask
     centres = extract_centres_from_mask(
         mask,
@@ -66,10 +55,10 @@ def process_image_mask_pair(
     
     if len(centres) == 0:
         logger.warning(f"No valid centres found in {mask_path}, skipping")
-        return []
+        return [], 0
     
     # Extract patches
-    patches = extract_patches_with_centres(
+    patches, n_skipped = extract_patches_with_centres(
         image,
         centres,
         patch_size=config['preprocessing']['patch_size'],
@@ -81,7 +70,7 @@ def process_image_mask_pair(
     for patch in patches:
         patch['source_image'] = image_path.stem
     
-    return patches
+    return patches, n_skipped
 
 
 def build_dataset(config_path: str = "configs/data.yaml") -> None:
@@ -94,9 +83,7 @@ def build_dataset(config_path: str = "configs/data.yaml") -> None:
     Pipeline:
         1. Load configuration
         2. Find all image-mask pairs
-        3. Extract patches from each pair
-        4. Create train/val/test splits
-        5. Save patches and create dataset index
+        3. Extract patches into train/val/test subdirectories
     """
     # Load configuration
     with open(config_path, 'r') as f:
@@ -106,13 +93,9 @@ def build_dataset(config_path: str = "configs/data.yaml") -> None:
     images_dir = Path(config['raw_data']['images_dir'])
     masks_dir = Path(config['raw_data']['masks_dir'])
     output_dir = Path(config['processed_data']['patches_dir'])
-    metadata_dir = Path(config['processed_data']['metadata_dir'])
-    splits_dir = Path(config['splits']['splits_dir'])
     
-    # Create output directories
+    # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
-    metadata_dir.mkdir(parents=True, exist_ok=True)
-    splits_dir.mkdir(parents=True, exist_ok=True)
     
     # Find all image files
     image_suffix = config['raw_data']['image_suffix']
@@ -126,6 +109,10 @@ def build_dataset(config_path: str = "configs/data.yaml") -> None:
     
     # Process all image-mask pairs
     all_patches = []
+    n_total = len(image_files)
+    n_no_mask = 0
+    n_no_patch = 0
+    n_skipped_min_cells_total = 0
     for image_path in tqdm(image_files, desc="Processing images"):
         # Construct corresponding mask path
         # Supports both mask_prefix (e.g., masks_image.tif) and mask_suffix (e.g., image_masks.tif)
@@ -143,13 +130,27 @@ def build_dataset(config_path: str = "configs/data.yaml") -> None:
         
         if not mask_path.exists():
             logger.warning(f"Mask not found for {image_path.name}, skipping")
+            n_no_mask += 1
             continue
         
         # Process this pair
-        patches = process_image_mask_pair(image_path, mask_path, config)
+        patches, n_skipped = process_image_mask_pair(image_path, mask_path, config)
+        if len(patches) == 0:
+            n_no_patch += 1
+        n_skipped_min_cells_total += n_skipped
         all_patches.extend(patches)
     
-    logger.info(f"Extracted {len(all_patches)} total patches")
+    n_candidate_patches = len(all_patches) + n_skipped_min_cells_total
+    skip_pct = 100.0 * n_skipped_min_cells_total / n_candidate_patches if n_candidate_patches > 0 else 0.0
+    logger.info("=" * 60)
+    logger.info("PREPROCESSING SUMMARY")
+    logger.info("=" * 60)
+    logger.info(f"  Images found             : {n_total}")
+    logger.info(f"  Skipped (no mask)        : {n_no_mask}  ({100.0*n_no_mask/n_total:.1f}%)")
+    logger.info(f"  Skipped (no centres)     : {n_no_patch}  ({100.0*n_no_patch/n_total:.1f}%)")
+    logger.info(f"  Patches kept             : {len(all_patches)}")
+    logger.info(f"  Patches skipped (min_cells filter) : {n_skipped_min_cells_total}  ({skip_pct:.1f}%)")
+    logger.info("=" * 60)
     
     if len(all_patches) == 0:
         logger.error("No patches extracted! Check your data and configuration.")
@@ -168,29 +169,8 @@ def build_dataset(config_path: str = "configs/data.yaml") -> None:
     for split_name, indices in splits.items():
         split_patches = [all_patches[i] for i in indices]
         split_output_dir = output_dir / split_name
-        
         save_patch_dataset(split_patches, split_output_dir, prefix="patch")
-        
         logger.info(f"{split_name}: {len(indices)} patches")
-    
-    # Save dataset index (mapping of patch indices to files)
-    dataset_index = {
-        'total_patches': len(all_patches),
-        'splits': {k: len(v) for k, v in splits.items()},
-        'config': config
-    }
-    
-    with open(metadata_dir / 'dataset_index.json', 'w') as f:
-        json.dump(dataset_index, f, indent=2)
-    
-    # Save split indices
-    for split_name, indices in splits.items():
-        np.save(splits_dir / f"{split_name}_indices.npy", np.array(indices))
-    
-    logger.info(f"Dataset built successfully!")
-    logger.info(f"  Train: {len(splits['train'])} patches")
-    logger.info(f"  Val: {len(splits['val'])} patches")
-    logger.info(f"  Test: {len(splits['test'])} patches")
 
 
 def create_splits(

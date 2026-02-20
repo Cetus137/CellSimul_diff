@@ -26,21 +26,32 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def load_config(config_paths):
-    """Load and merge configuration files."""
-    config = {}
-    for path in config_paths:
-        with open(path, 'r') as f:
-            config.update(yaml.safe_load(f))
-    return config
+def load_config(config_path):
+    """Load configuration from a single YAML file."""
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def get_conditioning_config(config):
+    """Return (active_channels dict, condition_channels int) from config."""
+    conditioning = config['unet'].get('conditioning')
+    if conditioning is not None:
+        active = {k: bool(v) for k, v in conditioning.items()}
+        n_channels = sum(1 for v in active.values() if v)
+    else:
+        # Legacy: explicit condition_channels integer, all channels assumed active
+        n_channels = config['unet']['condition_channels']
+        active = None
+    return active, n_channels
 
 
 def create_model(config):
     """Create U-Net and DDPM from configuration."""
+    active_channels, condition_channels = get_conditioning_config(config)
     unet = ConditionalUNet(
         in_channels=config['unet']['in_channels'],
         out_channels=config['unet']['out_channels'],
-        condition_channels=config['unet']['condition_channels'],
+        condition_channels=condition_channels,
         base_channels=config['unet']['base_channels'],
         channel_multipliers=config['unet']['channel_multipliers'],
         num_res_blocks=config['unet']['num_res_blocks'],
@@ -124,22 +135,10 @@ def main():
         description="Train centre-conditioned diffusion model"
     )
     parser.add_argument(
-        '--data_config',
+        '--config',
         type=str,
-        default='configs/data.yaml',
-        help='Path to data configuration'
-    )
-    parser.add_argument(
-        '--model_config',
-        type=str,
-        default='configs/model.yaml',
-        help='Path to model configuration'
-    )
-    parser.add_argument(
-        '--train_config',
-        type=str,
-        default='configs/train.yaml',
-        help='Path to training configuration'
+        default='configs/frame1.yaml',
+        help='Path to training config (data + model + training settings)'
     )
     parser.add_argument(
         '--resume',
@@ -153,16 +152,12 @@ def main():
         default=None,
         help='Device to train on (overrides config)'
     )
-    
+
     args = parser.parse_args()
-    
+
     # Load configuration
-    config = load_config([
-        args.data_config,
-        args.model_config,
-        args.train_config
-    ])
-    
+    config = load_config(args.config)
+
     # Set device
     if args.device:
         device = args.device
@@ -188,6 +183,10 @@ def main():
     
     # Create data loaders
     logger.info("Creating data loaders...")
+
+    # Resolve conditioning channels from config
+    active_channels, condition_channels = get_conditioning_config(config)
+    logger.info(f"Conditioning channels: {condition_channels} {active_channels or ''}")
     
     # Check for debug_overfit mode
     debug_overfit = config['training'].get('debug_overfit', {}).get('enabled', False)
@@ -218,7 +217,8 @@ def main():
         heatmap_sigma=config['preprocessing']['centre_heatmap_sigma'],
         augment=augment_train,
         p_uncond=p_uncond,
-        shuffle=True
+        shuffle=True,
+        active_channels=active_channels
     )
     
     # If debug_overfit, create a subset of the training data
@@ -244,7 +244,8 @@ def main():
         heatmap_sigma=config['preprocessing']['centre_heatmap_sigma'],
         augment=False,
         p_uncond=0.0,
-        shuffle=False
+        shuffle=False,
+        active_channels=active_channels
     )
     
     logger.info(f"Train batches: {len(train_loader)}")
@@ -281,7 +282,7 @@ def main():
         val_loader=val_loader,
         scheduler=scheduler,
         device=device,
-        checkpoint_dir=config['training']['checkpoint_dir'],
+        checkpoint_dir=config['training'].get('checkpoint_dir', 'checkpoints/frame1'),
         use_ema=config['training']['ema']['enabled'],
         ema_decay=config['training']['ema']['decay'],
         ema_update_every=config['training']['ema']['update_every'],
@@ -319,10 +320,7 @@ def main():
     logger.info("="*60)
     logger.info("Training completed!")
     logger.info("="*60)
-    logger.info(f"Checkpoints saved to: {config['training']['checkpoint_dir']}")
-    logger.info("Next steps:")
-    logger.info("  1. Evaluate the model")
-    logger.info("  2. Generate samples: python scripts/sample.py --checkpoint <path>")
+    logger.info(f"Checkpoints saved to: {config['training'].get('checkpoint_dir', 'checkpoints/frame1')}")
 
 
 if __name__ == "__main__":

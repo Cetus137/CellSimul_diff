@@ -317,11 +317,15 @@ def generate_conditioning_maps(
     heatmap_sigma: float = 3.0,
     boundary_sigma: float = 2.0,
     boundary_method: str = 'entropy',
-    distance_percentile: float = 95.0
+    distance_percentile: float = 95.0,
+    active_channels: Optional[dict] = None
 ) -> np.ndarray:
     """
-    Generate all conditioning maps as a stacked 3-channel tensor.
-    
+    Generate conditioning maps as a stacked tensor.
+
+    Channel order is always [heatmap, distance, boundary]; inactive channels
+    are simply omitted from the stack.
+
     Args:
         centres: Array of shape (N, 2) with (y, x) coordinates
         image_shape: (H, W) of output maps
@@ -329,12 +333,13 @@ def generate_conditioning_maps(
         boundary_sigma: Smoothing for boundary map
         boundary_method: Boundary detection method ('entropy', 'voronoi', 'distance_diff')
         distance_percentile: Percentile for robust distance normalization (default: 95)
-    
+        active_channels: Dict with boolean flags, e.g.
+            {'heatmap': True, 'distance': True, 'boundary': False}.
+            None means all three channels are active (default behaviour).
+
     Returns:
-        conditioning: Float array of shape (3, H, W) with:
-            [0]: Centre heatmap (clipped to [0, 1])
-            [1]: Distance-to-nearest-centre map (percentile-normalized to [0, 1])
-            [2]: Boundary likelihood map (normalized to [0, 1])
+        conditioning: Float array of shape (C, H, W) where C = number of
+            active channels (1–3), in order: heatmap, distance, boundary.
     
     Note:
         CRITICAL 3-CHANNEL GEOMETRY CONTROL:
@@ -374,32 +379,36 @@ def generate_conditioning_maps(
             All channels in [0, 1] - critical for gradient balance.
             Mismatched scales cause complete training failure.
     """
-    h, w = image_shape
-    
-    # Generate individual maps (all return [0, 1] range)
-    heatmap = generate_centre_heatmap(centres, image_shape, sigma=heatmap_sigma)
-    
-    # Use robust percentile-based normalization for distance map
-    distance_map = generate_distance_map(
-        centres, image_shape, 
-        normalize=True, 
-        use_percentile=True,
-        percentile=distance_percentile
-    )
-    
-    # Generate boundary map with specified method
-    boundary_map = generate_boundary_map(
-        centres, image_shape, 
-        sigma=boundary_sigma,
-        method=boundary_method
-    )
-    
-    # Stack along channel dimension: (3, H, W)
-    # Channel 0: Heatmap    - where cells are
-    # Channel 1: Distance   - cell proximity gradients
-    # Channel 2: Boundary   - geometric prior for membranes
-    conditioning = np.stack([heatmap, distance_map, boundary_map], axis=0)
-    
+    if active_channels is None:
+        active_channels = {'heatmap': True, 'distance': True, 'boundary': True}
+
+    maps = []
+
+    if active_channels.get('heatmap', True):
+        heatmap = generate_centre_heatmap(centres, image_shape, sigma=heatmap_sigma)
+        maps.append(heatmap)
+
+    if active_channels.get('distance', True):
+        distance_map = generate_distance_map(
+            centres, image_shape,
+            normalize=True,
+            use_percentile=True,
+            percentile=distance_percentile
+        )
+        maps.append(distance_map)
+
+    if active_channels.get('boundary', True):
+        boundary_map = generate_boundary_map(
+            centres, image_shape,
+            sigma=boundary_sigma,
+            method=boundary_method
+        )
+        maps.append(boundary_map)
+
+    if len(maps) == 0:
+        raise ValueError("active_channels: at least one channel must be enabled")
+
+    conditioning = np.stack(maps, axis=0)
     return conditioning.astype(np.float32)
 
 
