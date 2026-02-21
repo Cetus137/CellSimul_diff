@@ -357,7 +357,8 @@ class CellSynthesizer:
         output_dir: str,
         prefix: str = "synthetic",
         save_centres: bool = True,
-        save_visualization: bool = True
+        save_visualization: bool = True,
+        start_idx: int = 0,
     ):
         """
         Save generated images and centres to disk.
@@ -369,6 +370,7 @@ class CellSynthesizer:
             prefix: Filename prefix
             save_centres: Also save centres as .npy files
             save_visualization: Also save PNG with centre overlays
+            start_idx: Index to start numbering output files from (default: 0)
         """
         import tifffile
         import matplotlib.pyplot as plt
@@ -376,7 +378,7 @@ class CellSynthesizer:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        for i, (image, centres) in enumerate(zip(images, centres_list)):
+        for i, (image, centres) in enumerate(zip(images, centres_list), start=start_idx):
             # Save image as TIFF (convert to uint16 for compatibility)
             image_uint16 = (image * 65535).astype(np.uint16)
             image_file = output_path / f"{prefix}_{i:04d}.tif"

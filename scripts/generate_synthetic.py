@@ -233,33 +233,41 @@ Examples:
         elif args.method == 'from_file':
             centre_kwargs['centres_file'] = args.centres_file
         
-        # Generate images
-        images, centres_list = synthesizer.generate_batch(
-            num_samples=args.num_samples,
-            method=args.method,
-            use_cfg=use_cfg,
-            guidance_scale=args.guidance_scale,
-            seed=seed,
-            **centre_kwargs
-        )
-        
-        # Save results
-        synthesizer.save_samples(
-            images,
-            centres_list,
-            output_dir=args.output_dir,
-            prefix=args.prefix,
-            save_centres=True,
-            save_visualization=not args.no_visualization
-        )
-        
+        # Generate and save each sample immediately
+        logger.info(f"Generating {args.num_samples} samples (saving each on the fly)...")
+        all_cell_counts = []
+        for i in range(args.num_samples):
+            sample_seed = None if seed is None else seed + i
+            centres = synthesizer.generate_centres(
+                method=args.method,
+                seed=sample_seed,
+                **centre_kwargs
+            )
+            result = synthesizer.generate_image(
+                centres=centres,
+                use_cfg=use_cfg,
+                guidance_scale=args.guidance_scale
+            )
+            synthesizer.save_samples(
+                [result['image']],
+                [centres],
+                output_dir=args.output_dir,
+                prefix=args.prefix,
+                save_centres=True,
+                save_visualization=not args.no_visualization,
+                start_idx=i,
+            )
+            all_cell_counts.append(len(centres))
+            logger.info(f"  Saved sample {i + 1}/{args.num_samples}  "
+                        f"({len(centres)} cells)")
+
         logger.info("="*70)
         logger.info("✓ Generation complete!")
         logger.info("="*70)
-        logger.info(f"Generated {len(images)} images")
-        logger.info(f"Cell counts: min={min(len(c) for c in centres_list)}, "
-                   f"max={max(len(c) for c in centres_list)}, "
-                   f"mean={sum(len(c) for c in centres_list)/len(centres_list):.1f}")
+        logger.info(f"Generated {args.num_samples} images")
+        logger.info(f"Cell counts: min={min(all_cell_counts)}, "
+                   f"max={max(all_cell_counts)}, "
+                   f"mean={sum(all_cell_counts)/len(all_cell_counts):.1f}")
         logger.info(f"Output: {args.output_dir}/")
         logger.info("="*70)
         
