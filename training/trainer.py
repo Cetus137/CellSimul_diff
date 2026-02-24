@@ -274,18 +274,22 @@ class Trainer:
                 else:
                     logger.info("✓ x_start within expected range [%.4f, %.4f]", data_min, data_max)
                 
-                # Also check conditioning is in [0, 1]
-                cond_min = conditioning.min().item()
-                cond_max = conditioning.max().item()
-                if cond_min < -tolerance or cond_max > 1.0 + tolerance:
-                    logger.warning(
-                        "⚠️  CONDITIONING RANGE VIOLATION!\n"
-                        f"   Conditioning range: [{cond_min:.6f}, {cond_max:.6f}]\n"
-                        f"   Expected: [0.0, 1.0]\n"
-                        "   Check preprocessing/generate_condition_maps.py"
-                    )
-                else:
-                    logger.info("✓ Conditioning within expected range [0.0, 1.0]")
+                # Check all conditioning channels are in [0, 1]
+                cond_ok = True
+                for ci in range(conditioning.shape[1]):
+                    ch = conditioning[:, ci]
+                    ch_min, ch_max = ch.min().item(), ch.max().item()
+                    if ch_min < -tolerance or ch_max > 1.0 + tolerance:
+                        logger.warning(
+                            "⚠️  CONDITIONING RANGE VIOLATION (channel %d)!\n"
+                            "   Range: [%.6f, %.6f]  Expected: [0.0, 1.0]\n"
+                            "   Check dataset conditioning assembly.",
+                            ci, ch_min, ch_max,
+                        )
+                        cond_ok = False
+                if cond_ok:
+                    logger.info("✓ All %d conditioning channels within [0.0, 1.0]",
+                                conditioning.shape[1])
                 
                 logger.info("="*60 + "\n")
                 range_logged = True

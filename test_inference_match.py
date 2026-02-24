@@ -18,6 +18,13 @@ from datasets.centre_condition_dataset import CentreConditionDataset
 from preprocessing.generate_condition_maps import generate_conditioning_maps
 
 
+def _resolve_condition_channels(cfg: dict) -> int:
+    conditioning = cfg.get('unet', {}).get('conditioning')
+    if conditioning is not None:
+        return sum(1 for v in conditioning.values() if v)
+    return int(cfg.get('unet', {}).get('condition_channels', 3))
+
+
 def test_conditioning_consistency():
     """Test that inference and training generate identical conditioning."""
     print("\n" + "="*60)
@@ -56,12 +63,12 @@ def test_conditioning_consistency():
     print(f"Inference conditioning shape: {cond_inference_tensor.shape}")
     
     print(f"\nTraining conditioning stats:")
-    for i in range(3):
+    for i in range(int(cond_train.shape[0])):
         c = cond_train[i]
         print(f"  Channel {i}: min={c.min():.4f}, max={c.max():.4f}, mean={c.mean():.4f}, std={c.std():.4f}")
     
     print(f"\nInference conditioning stats:")
-    for i in range(3):
+    for i in range(int(cond_inference_tensor.shape[0])):
         c = cond_inference_tensor[i]
         print(f"  Channel {i}: min={c.min():.4f}, max={c.max():.4f}, mean={c.mean():.4f}, std={c.std():.4f}")
     
@@ -93,11 +100,13 @@ def test_sampling_quality(checkpoint_path='checkpoints/best.pt'):
     # Load model
     with open('configs/frame1.yaml', 'r') as f:
         config = yaml.safe_load(f)
+
+    condition_channels = _resolve_condition_channels(config)
     
     unet = ConditionalUNet(
         in_channels=config['unet']['in_channels'],
         out_channels=config['unet']['out_channels'],
-        condition_channels=config['unet']['condition_channels'],
+        condition_channels=condition_channels,
         base_channels=config['unet']['base_channels'],
         channel_multipliers=config['unet']['channel_multipliers'],
         num_res_blocks=config['unet']['num_res_blocks'],
