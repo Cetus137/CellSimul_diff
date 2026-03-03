@@ -181,7 +181,7 @@ def main():
 
     # ── Data loaders ───────────────────────────────────────────────────────────
     train_loader = get_dataloader3d(
-        patches_dir=config['processed_data']['patches_dir'],
+        patches_dir=config['processed_data']['patches_dir'],  # str or list
         split='train',
         batch_size=config['dataloader']['batch_size'],
         num_workers=config['dataloader']['num_workers'],
@@ -207,7 +207,7 @@ def main():
         logger.info(f"Debug mode: {len(indices)} patches")
 
     val_loader = get_dataloader3d(
-        patches_dir=config['processed_data']['patches_dir'],
+        patches_dir=config['processed_data']['patches_dir'],  # str or list
         split='val',
         batch_size=config['dataloader']['batch_size'],
         num_workers=config['dataloader']['num_workers'],

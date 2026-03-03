@@ -47,29 +47,38 @@ class TrainingVisualizer:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.dpi = dpi
         
-        # Loss history
+        # Loss history — train recorded per epoch, val recorded per step
         self.train_losses = []
-        self.val_losses = []
-        self.epochs = []
+        self.train_steps  = []   # global step at end of each epoch
+        self.epochs       = []
+        self.val_losses   = []   # (step, loss) tuples — every validate_every steps
         
     def add_metrics(
         self,
         epoch: int,
         train_loss: float,
-        val_loss: Optional[float] = None
+        step: int = 0,
     ):
         """
-        Add metrics for the current epoch.
+        Add per-epoch train metrics.
 
         Args:
-            epoch: Current epoch number
-            train_loss: Training loss
-            val_loss: Validation loss (optional)
+            epoch:      Current epoch number.
+            train_loss: Mean training loss for the epoch.
+            step:       Global step counter at end of epoch (for x-axis alignment).
         """
         self.epochs.append(epoch)
         self.train_losses.append(train_loss)
-        if val_loss is not None:
-            self.val_losses.append((epoch, val_loss))
+        self.train_steps.append(step)
+
+    def add_val_metric(self, step: int, val_loss: float):
+        """
+        Record a single validation measurement at a given global step.
+
+        Called every ``validate_every`` steps so the loss curve shows
+        sub-epoch resolution.
+        """
+        self.val_losses.append((step, val_loss))
     
     def plot_loss_curves(self, save_name: str = 'loss_curves.png'):
         """
@@ -83,25 +92,32 @@ class TrainingVisualizer:
             return
         
         plt.figure(figsize=(10, 6))
-        
-        # Plot train loss
-        plt.plot(self.epochs, self.train_losses, 'b-', label='Train Loss', linewidth=2)
-        
-        # Plot val loss
+
+        # Train loss — plotted at the global step recorded at epoch end
+        if self.train_steps:
+            plt.plot(self.train_steps, self.train_losses,
+                     'b-o', label='Train', linewidth=2, markersize=4)
+        else:
+            # Fallback: use epoch index when step info is absent
+            plt.plot(self.epochs, self.train_losses,
+                     'b-o', label='Train', linewidth=2, markersize=4)
+
+        # Val loss — one point per validate_every steps
         if len(self.val_losses) > 0:
-            ve, vl = zip(*self.val_losses)
-            plt.plot(ve, vl, 'r-', label='Val Loss', linewidth=2)
-        
-        plt.xlabel('Epoch', fontsize=12)
+            vs, vl = zip(*self.val_losses)
+            plt.plot(vs, vl, 'r-o', label='Val', linewidth=2, markersize=4)
+
+        plt.xlabel('Step', fontsize=12)
         plt.ylabel('Loss', fontsize=12)
         plt.title('Training Progress', fontsize=14, fontweight='bold')
         plt.legend(fontsize=10)
         plt.grid(True, alpha=0.3)
-        
+
         # Use log scale if losses vary significantly
         if len(self.train_losses) > 0:
             all_losses = list(self.train_losses)
-            if self.val_losses: all_losses += [l for _, l in self.val_losses]
+            if self.val_losses:
+                all_losses += [l for _, l in self.val_losses]
             if max(all_losses) / (min(all_losses) + 1e-10) > 10:
                 plt.yscale('log')
         

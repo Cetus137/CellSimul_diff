@@ -87,11 +87,12 @@ def sample_from_centres3d(
     active_channels: Optional[dict] = None,
     device: str = "cuda",
     use_cfg: bool = False,
-    guidance_scale: float = 3.0
+    guidance_scale: float = 3.0,
+    ddim_steps: Optional[int] = None,
 ) -> Tuple[np.ndarray, dict]:
     """
     Generate a 3D volume from cell centres using trained diffusion model.
-    
+
     Args:
         model: Trained DDPM3D model
         centres: (N, 3) array of cell centres in (z, y, x) order
@@ -101,13 +102,16 @@ def sample_from_centres3d(
         device: Computation device
         use_cfg: Whether to use classifier-free guidance
         guidance_scale: CFG scale (if use_cfg=True)
-    
+        ddim_steps: If set, use DDIM with this many steps instead of full DDPM.
+                    Recommended: 200 (~5x speedup), 100 (~10x), 50 (~20x).
+                    None = original DDPM-1000.
+
     Returns:
         volume: Generated volume (D, H, W)
         metadata: Dict with centres and conditioning
     """
     model.eval()
-    
+
     # Generate conditioning maps
     volume_shape = (volume_size, volume_size, volume_size)
     condition_maps = generate_conditioning_maps3d(
@@ -116,31 +120,131 @@ def sample_from_centres3d(
         heatmap_sigma=heatmap_sigma,
         active_channels=active_channels
     )
-    
+
     # Prepare conditioning tensor
     condition = torch.from_numpy(condition_maps).unsqueeze(0).to(device)  # (1, C, D, H, W)
-    
-    # Sample from model
-    if use_cfg:
-        # Classifier-free guidance
-        sample = model.sample_with_cfg(
-            conditioning=condition,
-            guidance_scale=guidance_scale
-        )
+
+    # Route to DDIM or DDPM depending on ddim_steps.
+    # NOTE: FP16 autocast is intentionally NOT used — the model was trained in FP32
+    # and small FP16 precision errors accumulate across denoising steps, producing
+    # visibly noisier outputs. DDIM alone already gives a large speedup.
+    if ddim_steps is not None:
+        if use_cfg:
+            sample = model.sample_ddim_with_cfg(
+                conditioning=condition,
+                guidance_scale=guidance_scale,
+                ddim_steps=ddim_steps,
+            )
+        else:
+            sample = model.sample_ddim(
+                conditioning=condition,
+                ddim_steps=ddim_steps,
+            )
     else:
-        sample = model.sample(
-            conditioning=condition
-        )
-    
+        # Original DDPM (1000 steps)
+        if use_cfg:
+            sample = model.sample_with_cfg(
+                conditioning=condition,
+                guidance_scale=guidance_scale
+            )
+        else:
+            sample = model.sample(
+                conditioning=condition
+            )
+
     # Convert to numpy
     volume = sample[0, 0].cpu().numpy()  # (D, H, W)
-    
+
     metadata = {
         'centres': centres,
         'condition_maps': condition_maps,
         'num_cells': len(centres),
         'use_cfg': use_cfg,
-        'guidance_scale': guidance_scale if use_cfg else None
+        'guidance_scale': guidance_scale if use_cfg else None,
+        'ddim_steps': ddim_steps,
     }
-    
+
     return volume, metadata
+
+
+@torch.no_grad()
+def sample_batch_from_centres3d(
+    model: DDPM3D,
+    centres_list: list,
+    volume_size: int = 128,
+    heatmap_sigma: float = 3.0,
+    active_channels: Optional[dict] = None,
+    device: str = "cuda",
+    use_cfg: bool = False,
+    guidance_scale: float = 3.0,
+    ddim_steps: Optional[int] = None,
+) -> Tuple[list, list]:
+    """
+    Generate a batch of 3D volumes in a single DDPM/DDIM pass.
+
+    Stacks conditioning tensors from all volumes into (B, C, D, H, W) and
+    runs a single denoising loop, giving ~B× throughput over calling
+    sample_from_centres3d B times.
+
+    Args:
+        model: Trained DDPM3D model
+        centres_list: List of (N_i, 3) centre arrays, one per volume
+        volume_size: Cubic volume side length
+        heatmap_sigma: Gaussian sigma for centre heatmap
+        active_channels: Dict specifying which conditioning channels are active
+        device: Computation device
+        use_cfg: Whether to use classifier-free guidance
+        guidance_scale: CFG scale (if use_cfg=True)
+        ddim_steps: If set, use DDIM with this many steps (None = full DDPM-1000)
+
+    Returns:
+        volumes: List of (D, H, W) numpy arrays, one per input
+        metadatas: List of metadata dicts, one per input
+    """
+    model.eval()
+    B = len(centres_list)
+    volume_shape = (volume_size, volume_size, volume_size)
+
+    # Build conditioning maps for each volume and stack into (B, C, D, H, W)
+    condition_maps_list = []
+    for centres in centres_list:
+        cmap = generate_conditioning_maps3d(
+            centres=centres,
+            volume_shape=volume_shape,
+            heatmap_sigma=heatmap_sigma,
+            active_channels=active_channels,
+        )
+        condition_maps_list.append(cmap)
+
+    condition = torch.from_numpy(np.stack(condition_maps_list, axis=0)).to(device)
+
+    # NOTE: FP16 autocast is intentionally NOT used — the model was trained in FP32
+    # and small FP16 precision errors accumulate across denoising steps, producing
+    # visibly noisier outputs.
+    if ddim_steps is not None:
+        if use_cfg:
+            samples = model.sample_ddim_with_cfg(condition, guidance_scale, ddim_steps)
+        else:
+            samples = model.sample_ddim(condition, ddim_steps)
+    else:
+        if use_cfg:
+            samples = model.sample_with_cfg(condition, guidance_scale)
+        else:
+            samples = model.sample(condition)
+
+    # Split batch back into individual volumes
+    volumes = [samples[b, 0].cpu().numpy() for b in range(B)]
+
+    metadatas = [
+        {
+            'centres': centres_list[b],
+            'condition_maps': condition_maps_list[b],
+            'num_cells': len(centres_list[b]),
+            'use_cfg': use_cfg,
+            'guidance_scale': guidance_scale if use_cfg else None,
+            'ddim_steps': ddim_steps,
+        }
+        for b in range(B)
+    ]
+
+    return volumes, metadatas

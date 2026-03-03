@@ -23,7 +23,9 @@ raw_data:
 
 # ── Processed data ────────────────────────────────────────────────────────────
 processed_data:
-  patches_dir: "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node2_3d/"  # created automatically by preprocessing
+  patches_dir:
+    - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/"
+    - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node2_3d/"
 
 # ── Preprocessing ─────────────────────────────────────────────────────────────
 preprocessing:
@@ -58,7 +60,7 @@ unet:
   # Conditioning channels (no boundary in 3D)
   conditioning:
     heatmap:  true    # Channel 0: Gaussian blobs at centres
-    distance: true    # Channel 1: Distance-to-nearest-centre (percentile-normalised)
+    distance: false    # Channel 1: Distance-to-nearest-centre (percentile-normalised)
   # → condition_channels = 2
 
   # Memory-efficient defaults for a single A100-40 GB at batch_size=1
@@ -97,6 +99,30 @@ scheduler:
   warmup_steps: 500
   min_lr:       1.0e-6
 
+# ── Realistic centre generation (measured from training data) ─────────────────
+# Source: configs/centre_stats_3d.yaml  (scripts/analyze_training_stats.py)
+# Data:   data_live_node1_3d/train  +  data_live_node2_3d/train
+centre_generation_3d:
+  border_margin: 10
+  max_attempts:  50
+  # ---- N distribution (measured) -----------------------------------------
+  n_mean:        25.97   # mean cells per 128³ patch
+  n_std:         7.57
+  n_min:         15      # p5  of training distribution
+  n_max:         41      # p95 of training distribution
+  # ---- Exclusion radius (p5 of per-cell NN distances) --------------------
+  min_distance:  25.61
+  # ---- Marginal KDE histograms (16 bins, sum to 1.0) ---------------------
+  # z: notable gradient — higher density near top of slab (z=0) than bottom
+  density_grid_z: [0.090431, 0.100492, 0.067893, 0.058719, 0.080659, 0.077776, 0.069163, 0.065828,
+                   0.064358, 0.062663, 0.060564, 0.051228, 0.040920, 0.038762, 0.037821, 0.032724]
+  # y: slight edge-depletion at both ends (border margin effect + tissue boundary)
+  density_grid_y: [0.042549, 0.073101, 0.067345, 0.066003, 0.061456, 0.062262, 0.063075, 0.063527,
+                   0.063447, 0.063205, 0.065533, 0.066041, 0.063606, 0.066835, 0.075055, 0.036960]
+  # x: same edge-depletion pattern as y (symmetric tiling)
+  density_grid_x: [0.042636, 0.073598, 0.066601, 0.064289, 0.063014, 0.064489, 0.064295, 0.064053,
+                   0.064122, 0.062982, 0.064327, 0.065254, 0.062745, 0.068161, 0.072217, 0.037218]
+
 # ── DataLoader ────────────────────────────────────────────────────────────────
 dataloader:
   batch_size:  1       # 128³ patches are large; increase only if VRAM allows
@@ -113,8 +139,8 @@ training:
   save_every:     1000
   validate_every: 5000
 
-  checkpoint_dir: "checkpoints/frame1_3d_node2"
-  viz_dir:        "visualizations/frame1_3d_node2"
+  checkpoint_dir: "checkpoints/frame1_3d_combined_noD_noZ_raw"
+  viz_dir:        "visualizations/frame1_3d_combined_noD_noZ_raw"
   keep_last_n_checkpoints: 5
 
   ema:

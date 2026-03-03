@@ -381,6 +381,9 @@ class Trainer:
             if self.val_loader is not None and self.step % self.validate_every == 0 and self.step > 0:
                 val_metrics = self.validate()
                 logger.info(f"Step {self.step} - Val loss: {val_metrics['loss']:.4f}")
+                if self.visualize:
+                    self.visualizer.add_val_metric(self.step, val_metrics['loss'])
+                    self.visualizer.plot_loss_curves()
                 self.model.train()
             
             # Checkpointing
@@ -484,19 +487,9 @@ class Trainer:
             train_metrics = self.train_epoch()
             logger.info(f"Epoch {epoch} - Train loss: {train_metrics['loss']:.4f}")
             
-            # Validate
-            val_loss = None
-            if self.val_loader is not None:
-                val_metrics = self.validate()
-                val_loss    = val_metrics['loss']
-                logger.info(f"Epoch {epoch} - Val loss: {val_loss:.4f}")
-
-            # Visualize
+            # Visualize train loss (val is recorded per-step inside train_epoch)
             if self.visualize:
-                # Add metrics
-                self.visualizer.add_metrics(epoch, train_metrics['loss'], val_loss)
-                
-                # Plot loss curves
+                self.visualizer.add_metrics(epoch, train_metrics['loss'], step=self.step)
                 self.visualizer.plot_loss_curves()
                 
                 # Visualize model output (every epoch)

@@ -11,10 +11,18 @@ derived from 3D cell-centre positions at times t and t+1 respectively.
 
 Usage examples
 --------------
-# Provide centres files for both frames:
+# Realistic mode — centres derived from training-data statistics (recommended):
 python -m sampling.sample_two_frame3d \\
     --frame1_ckpt checkpoints/frame1_3d/best.pt \\
     --frame2_ckpt checkpoints/frame2_3d/best.pt \\
+    --method realistic \\
+    --out_dir out/two_frame_3d
+
+# Provide explicit centres files for both frames:
+python -m sampling.sample_two_frame3d \\
+    --frame1_ckpt checkpoints/frame1_3d/best.pt \\
+    --frame2_ckpt checkpoints/frame2_3d/best.pt \\
+    --method from_file \\
     --centres_t  synthetic_cells/synthetic_0000_centres.npy \\
     --centres_t1 synthetic_cells/synthetic_0001_centres.npy \\
     --out_dir out/two_frame_3d
@@ -42,6 +50,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from models.diffusion3d import DDPM3D
 from models.unet3d import ConditionalUNet3D
 from preprocessing.generate_condition_maps3d import generate_conditioning_maps3d
+from sampling.generate_centres3d import generate_realistic_centres3d
 from utils.normalization import to_zero_one
 
 logging.basicConfig(
@@ -403,12 +412,36 @@ def main():
         help="Model config for frame 2"
     )
     parser.add_argument(
-        "--centres_t", required=True,
-        help="Path to .npy file with cell centres at time t  (N, 3) in (z,y,x)"
+        "--method", default="from_file", choices=["from_file", "realistic"],
+        help=(
+            "Centre generation strategy. "
+            "'from_file' (default): load from --centres_t / --centres_t1 .npy files. "
+            "'realistic': generate t centres from training-data statistics (centre_generation_3d "
+            "block in frame1_config), then derive t+1 centres by applying a small Gaussian "
+            "displacement (--displacement_sigma) to each t centre."
+        ),
     )
     parser.add_argument(
-        "--centres_t1", required=True,
-        help="Path to .npy file with cell centres at time t+1  (N, 3) in (z,y,x)"
+        "--centres_t", default=None,
+        help="Path to .npy file with cell centres at time t  (N, 3) in (z,y,x). "
+             "Required when --method from_file."
+    )
+    parser.add_argument(
+        "--centres_t1", default=None,
+        help="Path to .npy file with cell centres at time t+1  (N, 3) in (z,y,x). "
+             "Required when --method from_file."
+    )
+    parser.add_argument(
+        "--displacement_sigma", type=float, default=3.0,
+        help=(
+            "Std-dev (voxels) of the Gaussian displacement applied to each t centre to "
+            "produce t+1 centres in 'realistic' mode. Models typical inter-frame cell motion. "
+            "Default: 3.0 voxels."
+        ),
+    )
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="Random seed for realistic centre generation (default: None = non-deterministic)."
     )
     parser.add_argument(
         "--volume_size", type=int, default=128,
@@ -456,18 +489,84 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---- Load centres -------------------------------------------------
-    centres_t  = np.load(args.centres_t).astype(np.float32)
-    centres_t1 = np.load(args.centres_t1).astype(np.float32)
-    logger.info("centres_t: %d cells   centres_t1: %d cells",
-                len(centres_t), len(centres_t1))
-
-    # ---- Load models --------------------------------------------------
+    # ---- Load configs early (needed for realistic centre generation) --
     with open(args.frame1_config) as f:
         cfg1 = yaml.safe_load(f)
     with open(args.frame2_config) as f:
         cfg2 = yaml.safe_load(f)
 
+    # ---- Load / generate centres --------------------------------------
+    volume_shape = (args.volume_size, args.volume_size, args.volume_size)
+
+    if args.method == "from_file":
+        if args.centres_t is None or args.centres_t1 is None:
+            parser.error("--centres_t and --centres_t1 are required when --method from_file")
+        centres_t  = np.load(args.centres_t).astype(np.float32)
+        centres_t1 = np.load(args.centres_t1).astype(np.float32)
+        logger.info("Loaded centres_t: %d cells   centres_t1: %d cells",
+                    len(centres_t), len(centres_t1))
+
+    elif args.method == "realistic":
+        # Build realistic_params from the frame1 config
+        cg_cfg = cfg1.get("centre_generation_3d", {})
+        if not cg_cfg:
+            logger.warning(
+                "centre_generation_3d block not found in frame1 config — "
+                "using fallback defaults. Run scripts/analyze_training_stats.py "
+                "--save_stats to populate real values."
+            )
+        realistic_params = {
+            "n_mean":         cg_cfg.get("n_mean",        20.0),
+            "n_std":          cg_cfg.get("n_std",          8.0),
+            "n_min":          cg_cfg.get("n_min",          5),
+            "n_max":          cg_cfg.get("n_max",          60),
+            "min_distance":   cg_cfg.get("min_distance",   8.0),
+            "density_grid_z": cg_cfg.get("density_grid_z", [1.0] * 16),
+            "density_grid_y": cg_cfg.get("density_grid_y", [1.0] * 16),
+            "density_grid_x": cg_cfg.get("density_grid_x", [1.0] * 16),
+            "border_margin":  cg_cfg.get("border_margin",  10),
+            "max_attempts":   cg_cfg.get("max_attempts",   50),
+        }
+
+        rng = np.random.default_rng(args.seed)
+        seed_t = int(rng.integers(0, 2**31)) if args.seed is not None else None
+
+        logger.info(
+            "Generating t centres (realistic): n_mean=%.1f, n_std=%.1f, "
+            "min_distance=%.1f, displacement_sigma=%.1f",
+            realistic_params["n_mean"], realistic_params["n_std"],
+            realistic_params["min_distance"], args.displacement_sigma,
+        )
+
+        centres_t = generate_realistic_centres3d(
+            volume_shape=volume_shape,
+            seed=seed_t,
+            **realistic_params,
+        )
+
+        # Derive t+1 centres by applying a Gaussian displacement to each t centre.
+        # This models the small inter-frame motion of cells without generating an
+        # entirely independent layout (which would be biologically unrealistic).
+        border_margin = realistic_params["border_margin"]
+        d, h, w = volume_shape
+        displacement = rng.normal(
+            0.0, args.displacement_sigma, centres_t.shape
+        ).astype(np.float32)
+        centres_t1 = centres_t + displacement
+        # Clamp each axis to stay within the valid interior
+        centres_t1[:, 0] = np.clip(centres_t1[:, 0], border_margin, d - border_margin)
+        centres_t1[:, 1] = np.clip(centres_t1[:, 1], border_margin, h - border_margin)
+        centres_t1[:, 2] = np.clip(centres_t1[:, 2], border_margin, w - border_margin)
+
+        logger.info(
+            "Generated centres_t: %d cells   centres_t1: %d cells (displaced, σ=%.1f vox)",
+            len(centres_t), len(centres_t1), args.displacement_sigma,
+        )
+
+    else:
+        raise ValueError(f"Unknown --method: {args.method}")
+
+    # ---- Load models --------------------------------------------------
     active_geom1, _n_geom1, prev1, cond_ch1 = _resolve_conditioning(cfg1)
     active_geom2, _n_geom2, prev2, cond_ch2 = _resolve_conditioning(cfg2)
     if prev1:
@@ -502,7 +601,6 @@ def main():
         )
 
     # ---- Sample -------------------------------------------------------
-    volume_shape = (args.volume_size, args.volume_size, args.volume_size)
     vol_t, vol_t1 = sample_two_frames_3d(
         model_frame1=model1,
         model_frame2=model2,

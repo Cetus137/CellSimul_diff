@@ -16,14 +16,16 @@ random_seed: 42
 #   timepoint_TTTT_..._tile_NNNN_z0-256_y*_x*.tif        ← raw fluorescence volume
 #   timepoint_TTTT_..._tile_NNNN_z0-256_y*_x*_masks.tif  ← instance segmentation
 raw_data:
-  cubes_dir: "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/"
+  cubes_dir: "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node2_3d/"
   cube_suffix: ".tif"
   mask_suffix: "_masks.tif"
 
 # ── Temporal dataset ──────────────────────────────────────────────────────────
 temporal_dataset:
-  raw_dir:    "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/"
-  pairs_dir:  "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/pairs/"  # Output for preprocessing, input for training
+  raw_dir:    "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node2_3d/"
+  pairs_dir:
+    - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/pairs/"
+    - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node2_3d/pairs/"
   min_cells:  5          # Reject pairs with fewer cells in either frame
   train_frac: 0.8
   val_frac:   0.1

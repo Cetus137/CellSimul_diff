@@ -58,19 +58,11 @@ def _apply_augmentation_3d(
     Modifies volumes in-place via numpy ops and adjusts centre coordinates
     so that generate_conditioning_maps3d remains accurate.
 
+    Note: z/D axis is NOT flipped to preserve the tissue depth gradient
+          (signal attenuates with depth — flipping would confuse the model).
+
     Returns: (vol0, vol1, centres0, centres1) — all augmented.
     """
-    # Random Z flip
-    if random.random() < 0.5:
-        vol0 = np.flip(vol0, axis=0).copy()
-        vol1 = np.flip(vol1, axis=0).copy()
-        if len(centres0):
-            centres0 = centres0.copy()
-            centres0[:, 0] = (patch_d - 1) - centres0[:, 0]
-        if len(centres1):
-            centres1 = centres1.copy()
-            centres1[:, 0] = (patch_d - 1) - centres1[:, 0]
-
     # Random Y flip
     if random.random() < 0.5:
         vol0 = np.flip(vol0, axis=1).copy()
@@ -223,7 +215,7 @@ class TemporalPairDataset3D(Dataset):
 # ------------------------------------------------------------------
 
 def get_temporal_dataloader_3d(
-    split_dir: str,
+    split_dir,          # str | List[str]
     batch_size: int = 2,
     num_workers: int = 4,
     augment: bool = True,
@@ -254,14 +246,41 @@ def get_temporal_dataloader_3d(
     Returns:
         DataLoader yielding (images, conditioning) batches.
     """
-    dataset = TemporalPairDataset3D(
-        split_dir=split_dir,
-        augment=augment,
-        heatmap_sigma=heatmap_sigma,
-        distance_percentile=distance_percentile,
-        overfit_n=overfit_n,
-        active_channels=active_channels,
-    )
+    # Accept a single directory or a list of directories.
+    # When multiple directories are given, datasets are concatenated.
+    if isinstance(split_dir, (str, Path)):
+        split_dirs = [split_dir]
+    else:
+        split_dirs = list(split_dir)
+
+    if len(split_dirs) == 1:
+        dataset = TemporalPairDataset3D(
+            split_dir=split_dirs[0],
+            augment=augment,
+            heatmap_sigma=heatmap_sigma,
+            distance_percentile=distance_percentile,
+            overfit_n=overfit_n,
+            active_channels=active_channels,
+        )
+    else:
+        from torch.utils.data import ConcatDataset
+        parts = [
+            TemporalPairDataset3D(
+                split_dir=d,
+                augment=augment,
+                heatmap_sigma=heatmap_sigma,
+                distance_percentile=distance_percentile,
+                overfit_n=overfit_n,
+                active_channels=active_channels,
+            )
+            for d in split_dirs
+        ]
+        dataset = ConcatDataset(parts)
+        import logging as _log
+        _log.getLogger(__name__).info(
+            "Combined %d datasets: %s patches total",
+            len(parts), len(dataset),
+        )
 
     # CFG conditioning dropout — wrap dataset so that with probability p_uncond
     # the entire conditioning tensor (heatmap + distance + V_t) is zeroed out.

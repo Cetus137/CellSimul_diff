@@ -81,45 +81,61 @@ class TrainingVisualizer3D:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.dpi = dpi
 
-        self.train_losses: List[float]           = []
-        self.val_losses:   List[Optional[float]] = []
-        self.epochs:       List[int]             = []
+        self.train_losses: List[float]                  = []
+        self.val_losses:   List[tuple]                  = []  # (step, loss) tuples
+        self.epochs:       List[int]                    = []
+        self.train_steps:  List[int]                    = []
 
     # ------------------------------------------------------------------
-    # Metric tracking  (identical to 2-D version)
+    # Metric tracking
     # ------------------------------------------------------------------
 
     def add_metrics(
         self,
         epoch:      int,
         train_loss: float,
-        val_loss:   Optional[float] = None,
+        step:       int = 0,
     ):
-        """Append per-epoch metrics."""
+        """Append per-epoch train metrics."""
         self.epochs.append(epoch)
         self.train_losses.append(train_loss)
-        self.val_losses.append(val_loss)
+        self.train_steps.append(step)
+
+    def add_val_metric(self, step: int, val_loss: float):
+        """
+        Record a validation measurement at a given global step.
+
+        Called every validate_every steps for sub-epoch resolution.
+        """
+        self.val_losses.append((step, val_loss))
 
     def plot_loss_curves(self, save_name: str = "loss_curves.png"):
-        """Plot and save train/val loss curves."""
-        if len(self.epochs) < 2:
+        """Plot and save train/val loss curves (x-axis = global step)."""
+        if len(self.epochs) == 0:
             return
 
         fig, ax = plt.subplots(figsize=(8, 5))
-        ax.plot(self.epochs, self.train_losses, label="Train", color="blue")
 
-        val_ep  = [e for e, v in zip(self.epochs, self.val_losses) if v is not None]
-        val_los = [v for v in self.val_losses if v is not None]
-        if val_los:
-            ax.plot(val_ep, val_los, label="Val", color="orange")
+        if self.train_steps:
+            ax.plot(self.train_steps, self.train_losses, 'b-o',
+                    label="Train", linewidth=2, markersize=4)
+        else:
+            ax.plot(self.epochs, self.train_losses, 'b-o',
+                    label="Train", linewidth=2, markersize=4)
+
+        if self.val_losses:
+            vs, vl = zip(*self.val_losses)
+            ax.plot(vs, vl, 'r-o', label="Val", linewidth=2, markersize=4)
 
         # Log scale when dynamic range > 10×
-        lo = min(self.train_losses)
-        hi = max(self.train_losses)
+        all_losses = list(self.train_losses)
+        if self.val_losses:
+            all_losses += [l for _, l in self.val_losses]
+        lo, hi = min(all_losses), max(all_losses)
         if lo > 0 and hi / lo > 10:
             ax.set_yscale("log")
 
-        ax.set_xlabel("Epoch")
+        ax.set_xlabel("Step")
         ax.set_ylabel("Loss")
         ax.set_title("Training Loss – 3-D model", fontweight="bold")
         ax.legend()

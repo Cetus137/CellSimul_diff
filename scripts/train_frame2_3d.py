@@ -187,9 +187,14 @@ def main():
     logger.info("Total condition_channels (geom + V_t): %d", condition_channels)
 
     # ---- Data loaders -------------------------------------------------
-    pairs_dir = Path(cfg["temporal_dataset"]["pairs_dir"])
-    train_dir = str(pairs_dir / "train")
-    val_dir   = str(pairs_dir / "val")
+    # pairs_dir may be a single string or a list of strings (multi-dataset)
+    _pairs_dirs_raw = cfg["temporal_dataset"]["pairs_dir"]
+    if isinstance(_pairs_dirs_raw, str):
+        _pairs_dirs_raw = [_pairs_dirs_raw]
+    train_dir = [str(Path(d) / "train") for d in _pairs_dirs_raw]
+    val_dir   = [str(Path(d) / "val")   for d in _pairs_dirs_raw]
+    logger.info("Training from %d pairs director%s", len(_pairs_dirs_raw),
+                "y" if len(_pairs_dirs_raw) == 1 else "ies")
 
     batch_size = cfg.get("dataloader", {}).get("batch_size", 2)  # 3D: default 2
     num_workers = cfg.get("dataloader", {}).get("num_workers", 4)

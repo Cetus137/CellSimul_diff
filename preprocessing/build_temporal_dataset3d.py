@@ -39,10 +39,10 @@ logger = logging.getLogger(__name__)
 
 # Example: timepoint_0048_b2-2a_2c_pos6-01_crop_C1_t0-65_z72-328_y598-1622_x568-1592_tile_0012_z0-256_y448-704_x448-704.tif
 _RAW_RE = re.compile(
-    r"timepoint_(\d+)_.*_tile_(\d+)_z(\d+-\d+)_y(\d+-\d+)_x(\d+-\d+)\.tif$"
+    r"timepoint_(\d+)_(?:.*_)?tile_(\d+)_z(\d+-\d+)_y(\d+-\d+)_x(\d+-\d+)\.tif$"
 )
 _MASK_RE = re.compile(
-    r"timepoint_(\d+)_.*_tile_(\d+)_z(\d+-\d+)_y(\d+-\d+)_x(\d+-\d+)_masks\.tif$"
+    r"timepoint_(\d+)_(?:.*_)?tile_(\d+)_z(\d+-\d+)_y(\d+-\d+)_x(\d+-\d+)_masks\.tif$"
 )
 
 

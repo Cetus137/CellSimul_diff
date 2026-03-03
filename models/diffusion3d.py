@@ -221,6 +221,136 @@ class DDPM3D(nn.Module):
 
         return x_t
 
+    # ── DDIM sampling (fast inference, same weights as DDPM) ───────────────────
+
+    @torch.no_grad()
+    def sample_ddim(self, conditioning: torch.Tensor,
+                    ddim_steps: int = 200,
+                    eta: float = 0.0,
+                    shape: Optional[Tuple[int, ...]] = None,
+                    clip_denoised: bool = True) -> torch.Tensor:
+        """
+        DDIM sampling — deterministic reverse process over a sub-sequence of
+        timesteps (Song et al., 2020, arXiv:2010.02502).
+
+        Typical speedups vs DDPM-1000:
+            ddim_steps=200  →  ~5x   (recommended default)
+            ddim_steps=100  →  ~10x
+            ddim_steps=50   →  ~20x
+
+        Args:
+            conditioning: (B, C_cond, *spatial) — works for 2D or 3D.
+            ddim_steps: Number of denoising steps.
+            eta: Stochasticity coefficient — 0 = deterministic, 1 ≈ DDPM.
+            shape: Optional explicit output shape. Inferred from conditioning if None.
+            clip_denoised: Clip predicted x₀ to [data_min, data_max].
+        """
+        device = conditioning.device
+        if shape is None:
+            batch_size, _, *spatial = conditioning.shape
+            shape = (batch_size, 1, *spatial)
+
+        # Build uniformly-spaced sub-sequence τ over [0, T), then reverse
+        T = self.timesteps
+        step_size = max(1, T // ddim_steps)
+        tau = list(range(0, T, step_size))
+        if tau[-1] != T - 1:
+            tau.append(T - 1)
+        tau = list(reversed(tau))  # descending, e.g. [999, 994, …, 4, 0]
+
+        x_t = torch.randn(shape, device=device)
+
+        for idx in tqdm(range(len(tau)), desc=f'DDIM ({len(tau)} steps)', total=len(tau)):
+            t      = tau[idx]
+            t_prev = tau[idx + 1] if idx + 1 < len(tau) else -1
+
+            B = x_t.shape[0]
+            t_tensor = torch.full((B,), t, device=device, dtype=torch.long)
+
+            eps = self.predict_noise(x_t, t_tensor, conditioning)
+
+            # Predicted x₀ from current noisy sample and predicted noise
+            sqrt_acp = self._extract(self.sqrt_alphas_cumprod, t_tensor, x_t.shape)
+            sqrt_1m  = self._extract(self.sqrt_one_minus_alphas_cumprod, t_tensor, x_t.shape)
+            x0_pred  = (x_t - sqrt_1m * eps) / sqrt_acp
+            if clip_denoised:
+                x0_pred = torch.clamp(x0_pred, self.data_min, self.data_max)
+
+            if t_prev < 0:
+                x_t = x0_pred
+                continue
+
+            acp_t         = self._extract(self.alphas_cumprod, t_tensor, x_t.shape)
+            t_prev_tensor = torch.full((B,), t_prev, device=device, dtype=torch.long)
+            acp_prev      = self._extract(self.alphas_cumprod, t_prev_tensor, x_t.shape)
+
+            # DDIM σ — zero when eta=0 (fully deterministic)
+            sigma  = eta * torch.sqrt(
+                (1.0 - acp_prev) / (1.0 - acp_t) * (1.0 - acp_t / acp_prev)
+            )
+            dir_xt = torch.sqrt(torch.clamp(1.0 - acp_prev - sigma ** 2, min=0.0)) * eps
+            noise  = torch.randn_like(x_t) if eta > 0 else torch.zeros_like(x_t)
+            x_t    = torch.sqrt(acp_prev) * x0_pred + dir_xt + sigma * noise
+
+        return x_t
+
+    @torch.no_grad()
+    def sample_ddim_with_cfg(self, conditioning: torch.Tensor,
+                              guidance_scale: float = 3.0,
+                              ddim_steps: int = 200,
+                              eta: float = 0.0,
+                              shape: Optional[Tuple[int, ...]] = None,
+                              clip_denoised: bool = True) -> torch.Tensor:
+        """DDIM sampling with classifier-free guidance (dimension-generic)."""
+        device = conditioning.device
+        if shape is None:
+            batch_size, _, *spatial = conditioning.shape
+            shape = (batch_size, 1, *spatial)
+
+        T = self.timesteps
+        step_size = max(1, T // ddim_steps)
+        tau = list(range(0, T, step_size))
+        if tau[-1] != T - 1:
+            tau.append(T - 1)
+        tau = list(reversed(tau))
+
+        x_t    = torch.randn(shape, device=device)
+        uncond = torch.zeros_like(conditioning)
+
+        for idx in tqdm(range(len(tau)), desc=f'DDIM CFG ({len(tau)} steps)', total=len(tau)):
+            t      = tau[idx]
+            t_prev = tau[idx + 1] if idx + 1 < len(tau) else -1
+
+            B = x_t.shape[0]
+            t_tensor = torch.full((B,), t, device=device, dtype=torch.long)
+
+            eps_cond   = self.predict_noise(x_t, t_tensor, conditioning)
+            eps_uncond = self.predict_noise(x_t, t_tensor, uncond)
+            eps = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+
+            sqrt_acp = self._extract(self.sqrt_alphas_cumprod, t_tensor, x_t.shape)
+            sqrt_1m  = self._extract(self.sqrt_one_minus_alphas_cumprod, t_tensor, x_t.shape)
+            x0_pred  = (x_t - sqrt_1m * eps) / sqrt_acp
+            if clip_denoised:
+                x0_pred = torch.clamp(x0_pred, self.data_min, self.data_max)
+
+            if t_prev < 0:
+                x_t = x0_pred
+                continue
+
+            acp_t         = self._extract(self.alphas_cumprod, t_tensor, x_t.shape)
+            t_prev_tensor = torch.full((B,), t_prev, device=device, dtype=torch.long)
+            acp_prev      = self._extract(self.alphas_cumprod, t_prev_tensor, x_t.shape)
+
+            sigma  = eta * torch.sqrt(
+                (1.0 - acp_prev) / (1.0 - acp_t) * (1.0 - acp_t / acp_prev)
+            )
+            dir_xt = torch.sqrt(torch.clamp(1.0 - acp_prev - sigma ** 2, min=0.0)) * eps
+            noise  = torch.randn_like(x_t) if eta > 0 else torch.zeros_like(x_t)
+            x_t    = torch.sqrt(acp_prev) * x0_pred + dir_xt + sigma * noise
+
+        return x_t
+
     @torch.no_grad()
     def reverse_from_xT(self, x_T: torch.Tensor, conditioning: torch.Tensor,
                          guidance_scale: float = 0.0,

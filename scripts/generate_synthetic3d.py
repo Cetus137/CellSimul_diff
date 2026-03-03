@@ -18,9 +18,10 @@ sys.path.append(str(Path(__file__).parent.parent))
 from sampling.generate_centres3d import (
     generate_random_centres_simple3d,
     generate_random_centres_poisson3d,
-    generate_centres_from_training_distribution3d
+    generate_centres_from_training_distribution3d,
+    generate_realistic_centres3d,
 )
-from sampling.sample_from_centres3d import load_model3d, sample_from_centres3d
+from sampling.sample_from_centres3d import load_model3d, sample_from_centres3d, sample_batch_from_centres3d
 import yaml
 
 logging.basicConfig(
@@ -179,9 +180,9 @@ Examples:
     parser.add_argument(
         '--method',
         type=str,
-        choices=['simple', 'poisson', 'training_dist', 'from_file'],
-        default='poisson',
-        help='Cell centre generation method (default: poisson)'
+        choices=['simple', 'poisson', 'training_dist', 'from_file', 'realistic'],
+        default='realistic',
+        help='Cell centre generation method (default: realistic)'
     )
     
     parser.add_argument(
@@ -247,7 +248,18 @@ Examples:
         default=3.0,
         help='CFG guidance scale (default: 3.0)'
     )
-    
+
+    parser.add_argument(
+        '--ddim_steps',
+        type=int,
+        default=200,
+        help=(
+            'DDIM denoising steps (default: 200, ~5x faster than DDPM-1000). '
+            'Set to 100 for ~10x or 50 for ~20x speedup. '
+            'Use 0 to fall back to the original full DDPM-1000.'
+        )
+    )
+
     # Output parameters
     parser.add_argument(
         '--output_dir',
@@ -286,13 +298,30 @@ Examples:
         default=None,
         help='Random seed (overrides config random_seed)'
     )
+
+    parser.add_argument(
+        '--batch_size',
+        type=int,
+        default=1,
+        help=(
+            'Number of volumes to denoise in a single GPU pass (default: 1). '
+            'Set to 2 for ~2x throughput at ~2x peak VRAM cost. '
+            'Recommended: 2 on A100/RTX8000, 1 on V100 if VRAM is limited.'
+        )
+    )
     
     parser.add_argument(
         '--no_visualization',
         action='store_true',
         help='Disable visualization PNG generation (default: False)'
     )
-    
+
+    parser.add_argument(
+        '--no_heatmap',
+        action='store_true',
+        help='Disable saving of _heatmap.tif conditioning files (default: False)'
+    )
+
     args = parser.parse_args()
 
     # Load config
@@ -307,6 +336,21 @@ Examples:
     # Resolve active conditioning channels
     conditioning_cfg = cfg.get('unet', {}).get('conditioning')
     active_channels = {k: bool(v) for k, v in conditioning_cfg.items()} if conditioning_cfg else None
+
+    # Load data-derived centre generation statistics (populated by analyze_training_stats.py)
+    cg_cfg = cfg.get('centre_generation_3d', {})
+    realistic_params = {
+        'n_mean':         cg_cfg.get('n_mean',        20.0),
+        'n_std':          cg_cfg.get('n_std',          8.0),
+        'n_min':          cg_cfg.get('n_min',          5),
+        'n_max':          cg_cfg.get('n_max',          60),
+        'min_distance':   cg_cfg.get('min_distance',   8.0),
+        'density_grid_z': cg_cfg.get('density_grid_z', [1.0] * 16),
+        'density_grid_y': cg_cfg.get('density_grid_y', [1.0] * 16),
+        'density_grid_x': cg_cfg.get('density_grid_x', [1.0] * 16),
+        'border_margin':  cg_cfg.get('border_margin',  10),
+        'max_attempts':   cg_cfg.get('max_attempts',   50),
+    }
     
     # Handle CFG flag
     use_cfg = args.use_cfg and not args.no_cfg
@@ -335,6 +379,27 @@ Examples:
         logger.info(f"Parameters: mean={args.mean_cells}, std={args.std_cells}, min_distance={args.min_distance}")
     elif args.method == 'from_file':
         logger.info(f"Parameters: centres_file={args.centres_file}")
+        if args.num_samples > 1:
+            cf = Path(args.centres_file)
+            if cf.is_dir():
+                logger.info(f"  from_file: cycling through .npy files in {cf}")
+            else:
+                logger.warning(
+                    f"from_file: single file with num_samples={args.num_samples}. "
+                    "Each sample will receive Gaussian-jittered centres (sigma=1 voxel). "
+                    "Pass a directory of .npy files to use distinct centre sets."
+                )
+    elif args.method == 'realistic':
+        logger.info(
+            f"Parameters: n_mean={realistic_params['n_mean']:.1f}, "
+            f"n_std={realistic_params['n_std']:.1f}, "
+            f"min_distance={realistic_params['min_distance']:.1f}"
+        )
+        if not cfg.get('centre_generation_3d'):
+            logger.warning(
+                "centre_generation_3d not found in config — using fallback defaults. "
+                "Run scripts/analyze_training_stats.py --save_stats to populate real values."
+            )
     logger.info("="*70)
     
     try:
@@ -342,85 +407,120 @@ Examples:
         logger.info("Loading 3D model...")
         model = load_model3d(args.checkpoint, args.config, device)
         logger.info("Model loaded successfully")
-        
+
+        ddim_steps_eff = args.ddim_steps if args.ddim_steps and args.ddim_steps > 0 else None
+        if ddim_steps_eff:
+            logger.info(f"Sampler: DDIM ({ddim_steps_eff} steps)  [~{1000 // ddim_steps_eff}x faster than DDPM-1000]")
+        else:
+            logger.info("Sampler: DDPM (1000 steps)")
+
         # Create output directory
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # Generate samples
-        logger.info(f"Generating {args.num_samples} samples...")
+        batch_size = args.batch_size
+        logger.info(f"Generating {args.num_samples} samples (batch_size={batch_size})...")
         all_cell_counts = []
-        
+
         volume_shape = (volume_size, volume_size, volume_size)
-        
-        for i in range(args.num_samples):
-            sample_seed = None if seed is None else seed + i
-            
-            # Generate centres
+
+        def _generate_centres(bi: int) -> np.ndarray:
+            """Generate centres for sample index bi."""
+            sample_seed = None if seed is None else seed + bi
             if args.method == 'simple':
-                centres = generate_random_centres_simple3d(
+                return generate_random_centres_simple3d(
                     volume_shape=volume_shape,
                     num_cells=args.num_cells,
                     border_margin=10,
-                    seed=sample_seed
+                    seed=sample_seed,
                 )
             elif args.method == 'poisson':
-                centres = generate_random_centres_poisson3d(
+                return generate_random_centres_poisson3d(
                     volume_shape=volume_shape,
                     density=args.density,
                     min_distance=args.min_distance,
                     border_margin=10,
-                    seed=sample_seed
+                    seed=sample_seed,
                 )
             elif args.method == 'training_dist':
-                centres = generate_centres_from_training_distribution3d(
+                return generate_centres_from_training_distribution3d(
                     volume_shape=volume_shape,
                     mean_cells=args.mean_cells,
                     std_cells=args.std_cells,
                     mean_min_dist=args.min_distance,
                     border_margin=10,
-                    seed=sample_seed
+                    seed=sample_seed,
                 )
             elif args.method == 'from_file':
                 if args.centres_file is None:
                     raise ValueError("--centres_file required for method=from_file")
-                centres = np.load(args.centres_file)
+                cf_path = Path(args.centres_file)
+                if cf_path.is_dir():
+                    npy_files = sorted(cf_path.glob("*_centres.npy"))
+                    if not npy_files:
+                        raise ValueError(f"No *_centres.npy files found in {cf_path}")
+                    return np.load(npy_files[bi % len(npy_files)])
+                else:
+                    c = np.load(cf_path).astype(np.float32)
+                    if args.num_samples > 1 and bi > 0:
+                        jitter = np.random.normal(0.0, 1.0, c.shape).astype(np.float32)
+                        c = np.clip(c + jitter, 10, volume_size - 10)
+                    return c
+            elif args.method == 'realistic':
+                return generate_realistic_centres3d(
+                    volume_shape=volume_shape,
+                    seed=sample_seed,
+                    **realistic_params,
+                )
             else:
                 raise ValueError(f"Unknown method: {args.method}")
-            
-            # Generate volume
-            volume, metadata = sample_from_centres3d(
+
+        i = 0
+        while i < args.num_samples:
+            batch_indices = list(range(i, min(i + batch_size, args.num_samples)))
+            batch_centres = [_generate_centres(bi) for bi in batch_indices]
+
+            # Single denoising pass for the whole batch
+            volumes, metadatas = sample_batch_from_centres3d(
                 model=model,
-                centres=centres,
+                centres_list=batch_centres,
                 volume_size=volume_size,
                 heatmap_sigma=heatmap_sigma,
                 active_channels=active_channels,
                 device=device,
                 use_cfg=use_cfg,
-                guidance_scale=args.guidance_scale
+                guidance_scale=args.guidance_scale,
+                ddim_steps=ddim_steps_eff,
             )
-            
-            # Save volume as TIF
-            volume_file = output_dir / f"{args.prefix}_{i:04d}.tif"
-            tifffile.imwrite(str(volume_file), volume.astype(np.float32))
-            
-            # Save heatmap conditioning (channel 0 of condition_maps)
-            heatmap = metadata['condition_maps'][0]  # (D, H, W)
-            heatmap_file = output_dir / f"{args.prefix}_{i:04d}_heatmap.tif"
-            tifffile.imwrite(str(heatmap_file), heatmap.astype(np.float32))
-            
-            # Save centres
-            centres_file = output_dir / f"{args.prefix}_{i:04d}_centres.npy"
-            np.save(str(centres_file), centres)
-            
-            # Save visualization
-            if not args.no_visualization:
-                viz_file = output_dir / f"{args.prefix}_{i:04d}_viz.png"
-                save_3d_visualization(volume, centres, viz_file, heatmap=heatmap)
-            
-            all_cell_counts.append(len(centres))
-            logger.info(f"  Saved sample {i + 1}/{args.num_samples}  "
-                       f"({len(centres)} cells)")
+
+            # Save each volume in the batch
+            for j, (bi, volume, metadata) in enumerate(
+                zip(batch_indices, volumes, metadatas)
+            ):
+                centres = batch_centres[j]
+                heatmap = metadata['condition_maps'][0]  # (D, H, W)
+
+                volume_file  = output_dir / f"{args.prefix}_{bi:04d}.tif"
+                centres_file = output_dir / f"{args.prefix}_{bi:04d}_centres.npy"
+
+                tifffile.imwrite(str(volume_file), volume.astype(np.float32))
+                np.save(str(centres_file), centres)
+
+                if not args.no_heatmap:
+                    heatmap_file = output_dir / f"{args.prefix}_{bi:04d}_heatmap.tif"
+                    tifffile.imwrite(str(heatmap_file), heatmap.astype(np.float32))
+
+                if not args.no_visualization:
+                    viz_file = output_dir / f"{args.prefix}_{bi:04d}_viz.png"
+                    save_3d_visualization(volume, centres, viz_file, heatmap=heatmap)
+
+                all_cell_counts.append(len(centres))
+                logger.info(
+                    f"  Saved sample {bi + 1}/{args.num_samples}  ({len(centres)} cells)"
+                )
+
+            i += len(batch_indices)
         
         logger.info("="*70)
         logger.info("✓ Generation complete!")

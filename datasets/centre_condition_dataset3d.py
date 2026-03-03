@@ -125,17 +125,16 @@ class CentreConditionDataset3D(Dataset):
         Apply random volume augmentations (geometric only).
 
         Augmentations act identically on image and conditioning:
-          - Random flip along D axis (axis 1 for (1,D,H,W))
           - Random flip along H axis (axis 2)
           - Random flip along W axis (axis 3)
           - Random k×90° rotation in the H-W plane (axes 2,3)
+        Note: z/D axis is NOT flipped to preserve the tissue depth gradient
+              (signal attenuates with depth — flipping would confuse the model).
         """
         def _flip_pair(ax):
             return (np.flip(image, axis=ax).copy(),
                     np.flip(conditioning, axis=ax).copy())
 
-        if np.random.rand() > 0.5:
-            image, conditioning = _flip_pair(1)   # z
         if np.random.rand() > 0.5:
             image, conditioning = _flip_pair(2)   # y
         if np.random.rand() > 0.5:
@@ -175,7 +174,7 @@ class ConditionalDropoutDataset3D(Dataset):
 
 
 def get_dataloader3d(
-    patches_dir: str,
+    patches_dir,    # str | List[str]
     split: str,
     batch_size: int,
     num_workers: int = 4,
@@ -202,14 +201,38 @@ def get_dataloader3d(
     Returns:
         DataLoader yielding (image, conditioning) batches.
     """
-    ds = CentreConditionDataset3D(
-        patches_dir=patches_dir,
-        split=split,
-        heatmap_sigma=heatmap_sigma,
-        normalize_images=True,
-        augment=augment,
-        active_channels=active_channels
-    )
+    if isinstance(patches_dir, (str, Path)):
+        patches_dirs = [patches_dir]
+    else:
+        patches_dirs = list(patches_dir)
+
+    if len(patches_dirs) == 1:
+        ds = CentreConditionDataset3D(
+            patches_dir=patches_dirs[0],
+            split=split,
+            heatmap_sigma=heatmap_sigma,
+            normalize_images=True,
+            augment=augment,
+            active_channels=active_channels
+        )
+    else:
+        from torch.utils.data import ConcatDataset
+        parts = [
+            CentreConditionDataset3D(
+                patches_dir=d,
+                split=split,
+                heatmap_sigma=heatmap_sigma,
+                normalize_images=True,
+                augment=augment,
+                active_channels=active_channels,
+            )
+            for d in patches_dirs
+        ]
+        ds = ConcatDataset(parts)
+        logger.info(
+            "Combined %d datasets for split '%s': %d patches total",
+            len(parts), split, len(ds),
+        )
 
     if p_uncond > 0.0:
         ds = ConditionalDropoutDataset3D(ds, p_uncond=p_uncond)
