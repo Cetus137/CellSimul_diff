@@ -1,0 +1,162 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 3D Unified Autoregressive Diffusion — config
+#
+# Model: ConditionalUNet3D wrapped in DDPM3D
+# Purpose: Single model replacing both frame1_3d and frame2_3d.
+#          Trained jointly on single-frame patches and temporal pairs.
+#          At inference:
+#            • Frame 0:   conditioning = [heatmap_t,  zeros          ]
+#            • Frame t+1: conditioning = [heatmap_t1, volume_t in 0-1]
+#
+# Conditioning: heatmap + prev_frame  (C = 2 total, distance excluded)
+#   Channel 0: Gaussian blob heatmap of target-frame centres  in [0, 1]
+#   Channel 1: Previous frame V_{t-1} re-ranged to [0, 1]     (zeros for first frame)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── General ───────────────────────────────────────────────────────────────────
+device: "cuda"
+random_seed: 42
+
+# ── Unified dataset ───────────────────────────────────────────────────────────
+# Single-frame patches + temporal pairs are mixed with WeightedRandomSampler.
+unified_dataset:
+  patches_dirs:
+    - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/"
+    - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node2_3d/"
+  pairs_dirs:
+    - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/pairs/"
+    - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node2_3d/pairs/"
+  # Relative weight given to each pair item vs. each single-frame item.
+  # Both pools are ~equal size (~14 500 vs ~16 500 train samples), so 1.0 is
+  # a sensible default.  Increase to e.g. 2.0 if temporal structure is under-learned.
+  pair_sample_weight: 1.0
+  # Probability of zeroing the prev-frame channel (ch1) for pair items.
+  # Teaches the model to handle the no-previous-frame case (frame 0 at inference).
+  prev_frame_dropout: 0.15
+
+# ── Preprocessing ─────────────────────────────────────────────────────────────
+preprocessing:
+  patch_size: 128
+  patch_stride: 128
+  z_start: 24
+  min_cells_per_patch: 5
+  min_cell_volume: 500
+  max_cell_volume: 500000
+  centre_heatmap_sigma: 3.0
+  distance_percentile: 95.0
+
+# ── Augmentation ──────────────────────────────────────────────────────────────
+augmentation:
+  enabled: true
+  random_flip_horizontal: true
+  random_flip_vertical: true
+  random_rotate_90: true
+
+# ── U-Net architecture ────────────────────────────────────────────────────────
+unet:
+  in_channels:  1
+  out_channels: 1
+
+  # 2-channel conditioning: heatmap (geom) + prev_frame (appearance)
+  conditioning:
+    heatmap:  true    # Channel 0: Gaussian blobs at target-frame centres
+    distance: false   # Excluded — only heatmap used as geometry signal
+  prev_frame: true    # Channel 1: V_{t-1} in [0, 1]  (zeros for frame 0)
+  # → condition_channels = 1 + 1 = 2
+
+  base_channels: 32
+  channel_multipliers: [1, 2, 4, 8]   # feature maps: [32, 64, 128, 256]
+  num_res_blocks: 2
+  norm_groups:   32
+  time_emb_dim:  256
+  dropout:       0.1
+
+# ── Diffusion ─────────────────────────────────────────────────────────────────
+diffusion:
+  timesteps: 1000
+  beta_schedule: "linear"
+  beta_start:    0.0001
+  beta_end:      0.02
+  prediction_type: "epsilon"
+  loss_type: "l2"
+  cfg:
+    enabled:        true
+    dropout_prob:   0.1
+    guidance_scale: 3.0
+
+# ── Optimizer ─────────────────────────────────────────────────────────────────
+optimizer:
+  type:          "AdamW"
+  learning_rate: 1.0e-4
+  weight_decay:  0.01
+  betas:         [0.9, 0.999]
+  eps:           1.0e-8
+
+# ── LR scheduler ──────────────────────────────────────────────────────────────
+scheduler:
+  type:         "cosine"
+  warmup_steps: 500
+  min_lr:       1.0e-6
+
+# ── DataLoader ────────────────────────────────────────────────────────────────
+dataloader:
+  batch_size:  4
+  num_workers: 8
+
+# ── Training ──────────────────────────────────────────────────────────────────
+training:
+  num_epochs:      300
+  gradient_clip:   1.0
+  mixed_precision: true
+  visualize:       true
+
+  log_every:      100
+  save_every:     5000
+  validate_every: 5000
+
+  checkpoint_dir: "checkpoints/unified_3d_2"
+  viz_dir:        "visualizations/unified_3d_2"
+  keep_last_n_checkpoints: 5
+
+  ema:
+    enabled:      true
+    decay:        0.9999
+    update_every: 10
+
+  small_data_mode:
+    enabled:            true
+    p_uncond:           0.1
+    low_noise_bias:     false
+    low_noise_fraction: 0.3
+    low_noise_weight:   3.0
+
+  debug_overfit:
+    enabled:              false
+    num_patches:          4
+    disable_augmentation: true
+    disable_cfg:          true
+
+# ── Centre generation (used by --method realistic in generate_timeseries_unified_3d.py) ──
+# Stats derived from data_live_node1_3d + data_live_node2_3d; matches frame1_3d.yaml.
+# Re-run scripts/analyze_training_stats.py --save_stats if training data changes.
+centre_generation_3d:
+  border_margin: 10
+  max_attempts:  50
+  n_mean:        25.97   # mean cells per 128³ patch
+  n_std:         7.57
+  n_min:         15      # p5  of training distribution
+  n_max:         41      # p95 of training distribution
+  min_distance:  25.61   # p5 of per-cell nearest-neighbour distances (voxels)
+  # 32-bin marginal KDE histograms; each axis sums to 1.0
+  density_grid_z: [0.0385, 0.0521, 0.0507, 0.0491, 0.0399, 0.0282, 0.0268, 0.032,  0.039,  0.0415,
+                   0.0412, 0.0366, 0.0348, 0.0344, 0.0331, 0.0324, 0.0324, 0.032,  0.031,  0.0317,
+                   0.0313, 0.0293, 0.0272, 0.0241, 0.0218, 0.0194, 0.0195, 0.0194, 0.0189, 0.019,
+                   0.0175, 0.0152]
+  density_grid_y: [0.0144, 0.0284, 0.0373, 0.0355, 0.0337, 0.0338, 0.0334, 0.0326, 0.0303, 0.0311,
+                   0.0314, 0.0307, 0.0314, 0.0318, 0.0319, 0.0316, 0.0315, 0.0319, 0.0319, 0.0311,
+                   0.0324, 0.0332, 0.0332, 0.0331, 0.0311, 0.0324, 0.0327, 0.0343, 0.0369, 0.0381,
+                   0.0233, 0.0138]
+  density_grid_x: [0.015,  0.0278, 0.0371, 0.0366, 0.034,  0.0325, 0.0324, 0.0319, 0.0317, 0.0314,
+                   0.0322, 0.0322, 0.0324, 0.0318, 0.0322, 0.0317, 0.032,  0.0323, 0.0321, 0.0308,
+                   0.032,  0.0323, 0.033,  0.0321, 0.032,  0.0313, 0.0328, 0.0353, 0.0359, 0.0359,
+                   0.0227, 0.0145]

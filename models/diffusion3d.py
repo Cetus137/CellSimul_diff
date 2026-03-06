@@ -161,13 +161,18 @@ class DDPM3D(nn.Module):
     def sample(self, conditioning: torch.Tensor,
                shape: Optional[Tuple[int, ...]] = None,
                clip_denoised: bool = True,
-               return_intermediates: bool = False) -> torch.Tensor:
+               return_intermediates: bool = False,
+               prev_vol_active_frac: float = 1.0) -> torch.Tensor:
         """
         Generate samples from random noise.
 
         Args:
             conditioning: (B, C_cond, *spatial) — works for 2D or 3D.
             shape: Optional explicit output shape. Inferred from conditioning if None.
+            prev_vol_active_frac: Fraction of denoising steps (from t=0 upward)
+                during which ch1 (prev_vol) is active. E.g. 0.3 zeros ch1 for
+                the first 70% of steps (high-noise / global-structure phase) and
+                restores it for the final 30% (refinement). 1.0 = always active.
         """
         device = conditioning.device
         if shape is None:
@@ -176,9 +181,15 @@ class DDPM3D(nn.Module):
 
         x_t = torch.randn(shape, device=device)
         intermediates = [x_t] if return_intermediates else []
+        _prev_threshold = int(self.timesteps * prev_vol_active_frac)
 
         for t in tqdm(reversed(range(self.timesteps)), desc='Sampling', total=self.timesteps):
-            x_t = self.p_sample(x_t, t, conditioning, clip_denoised)
+            if prev_vol_active_frac < 1.0 and t >= _prev_threshold:
+                cond_t = conditioning.clone()
+                cond_t[:, 1:] = 0.0
+            else:
+                cond_t = conditioning
+            x_t = self.p_sample(x_t, t, cond_t, clip_denoised)
             if return_intermediates:
                 intermediates.append(x_t)
 
@@ -188,8 +199,15 @@ class DDPM3D(nn.Module):
     def sample_with_cfg(self, conditioning: torch.Tensor,
                         guidance_scale: float = 3.0,
                         shape: Optional[Tuple[int, ...]] = None,
-                        clip_denoised: bool = True) -> torch.Tensor:
-        """Classifier-free guidance sampling (dimension-generic)."""
+                        clip_denoised: bool = True,
+                        prev_vol_active_frac: float = 1.0) -> torch.Tensor:
+        """Classifier-free guidance sampling (dimension-generic).
+
+        Args:
+            prev_vol_active_frac: Fraction of denoising steps (from t=0 upward)
+                during which ch1 (prev_vol) is active. During zeroed steps the
+                CFG purely amplifies the heatmap signal. 1.0 = always active.
+        """
         device = conditioning.device
         if shape is None:
             batch_size, _, *spatial = conditioning.shape
@@ -197,12 +215,19 @@ class DDPM3D(nn.Module):
 
         x_t = torch.randn(shape, device=device)
         uncond = torch.zeros_like(conditioning)
+        _prev_threshold = int(self.timesteps * prev_vol_active_frac)
 
         for t in tqdm(reversed(range(self.timesteps)), desc='Sampling (CFG)', total=self.timesteps):
             B = x_t.shape[0]
             t_tensor = torch.full((B,), t, device=device, dtype=torch.long)
 
-            noise_cond   = self.predict_noise(x_t, t_tensor, conditioning)
+            if prev_vol_active_frac < 1.0 and t >= _prev_threshold:
+                cond_t = conditioning.clone()
+                cond_t[:, 1:] = 0.0
+            else:
+                cond_t = conditioning
+
+            noise_cond   = self.predict_noise(x_t, t_tensor, cond_t)
             noise_uncond = self.predict_noise(x_t, t_tensor, uncond)
             noise = noise_uncond + guidance_scale * (noise_cond - noise_uncond)
 
@@ -385,6 +410,122 @@ class DDPM3D(nn.Module):
             noise_s = torch.randn_like(x_t)
             nz_mask = (t_tensor != 0).float().view(-1, *([1] * (len(x_t.shape) - 1)))
             x_t = mean + nz_mask * torch.sqrt(var) * noise_s
+
+        return x_t
+
+    # ── SDEdit / img2img methods ───────────────────────────────────────────────
+
+    @torch.no_grad()
+    def sample_img2img(self, x_0: torch.Tensor, t_start: int,
+                       conditioning: torch.Tensor,
+                       noise: Optional[torch.Tensor] = None,
+                       clip_denoised: bool = True) -> torch.Tensor:
+        """
+        SDEdit-style img2img via DDPM.
+
+        Corrupts x_0 to timestep t_start via the closed-form forward process
+        q(x_{t_start} | x_0), then runs the standard DDPM reverse from t_start
+        down to 0 conditioned on `conditioning` (e.g. heatmap of C_{t+1}).
+
+        Noise level t_start controls the coherence/change trade-off:
+          low  (~100-150): high fidelity to source appearance, small changes
+          mid  (~250):     balanced — recommended starting point
+          high (~400-600): large structural changes, loose coupling to source
+
+        Args:
+            x_0:           Clean source volume (B, 1, D, H, W), normalised to
+                           [data_min, data_max] (typically [-1, 1]).
+            t_start:       Forward-noise timestep (0 < t_start < timesteps).
+            conditioning:  Target conditioning maps (B, C, D, H, W).
+            noise:         Optional fixed noise epsilon; sampled from N(0,I) if None.
+            clip_denoised: Clip predicted x_0 to [data_min, data_max].
+
+        Returns:
+            Denoised volume tensor (B, 1, D, H, W).
+        """
+        device = x_0.device
+        B = x_0.shape[0]
+        t_tensor = torch.full((B,), t_start, device=device, dtype=torch.long)
+        x_t = self.q_sample(x_0, t_tensor, noise=noise)
+
+        for t in tqdm(reversed(range(t_start + 1)),
+                      desc=f'Img2img DDPM (t_start={t_start})',
+                      total=t_start + 1):
+            x_t = self.p_sample(x_t, t, conditioning, clip_denoised)
+
+        return x_t
+
+    @torch.no_grad()
+    def sample_img2img_ddim(self, x_0: torch.Tensor, t_start: int,
+                            conditioning: torch.Tensor,
+                            ddim_steps: int = 50,
+                            eta: float = 0.0,
+                            noise: Optional[torch.Tensor] = None,
+                            clip_denoised: bool = True) -> torch.Tensor:
+        """
+        SDEdit-style img2img via DDIM (faster than full DDPM).
+
+        Same as sample_img2img but uses a sub-sampled DDIM trajectory over
+        [0, t_start], giving ~t_start/T * ddim_steps UNet forward passes
+        instead of t_start passes.
+
+        Args:
+            x_0:           Clean source volume (B, 1, D, H, W).
+            t_start:       Forward-noise timestep (0 < t_start < timesteps).
+            conditioning:  Target conditioning maps (B, C, D, H, W).
+            ddim_steps:    Reference step count for the full T-step schedule;
+                           actual steps taken is the proportional subset <= t_start.
+            eta:           DDIM stochasticity (0.0 = deterministic).
+            noise:         Optional fixed noise for q_sample.
+            clip_denoised: Clip predicted x_0.
+
+        Returns:
+            Denoised volume tensor (B, 1, D, H, W).
+        """
+        device = x_0.device
+        B = x_0.shape[0]
+
+        # Corrupt source image to t_start
+        t_tensor = torch.full((B,), t_start, device=device, dtype=torch.long)
+        x_t = self.q_sample(x_0, t_tensor, noise=noise)
+
+        # Build the full DDIM sub-sequence then keep only steps <= t_start
+        T = self.timesteps
+        step_size = max(1, T // ddim_steps)
+        tau = [s for s in range(0, T, step_size) if s <= t_start]
+        if not tau or tau[-1] != t_start:
+            tau.append(t_start)
+        tau = list(reversed(tau))  # descending: [t_start, ..., 4, 0]
+
+        for idx in tqdm(range(len(tau)),
+                        desc=f'Img2img DDIM (t_start={t_start}, {len(tau)} steps)',
+                        total=len(tau)):
+            t      = tau[idx]
+            t_prev = tau[idx + 1] if idx + 1 < len(tau) else -1
+
+            t_tensor = torch.full((B,), t, device=device, dtype=torch.long)
+            eps = self.predict_noise(x_t, t_tensor, conditioning)
+
+            sqrt_acp = self._extract(self.sqrt_alphas_cumprod, t_tensor, x_t.shape)
+            sqrt_1m  = self._extract(self.sqrt_one_minus_alphas_cumprod, t_tensor, x_t.shape)
+            x0_pred  = (x_t - sqrt_1m * eps) / sqrt_acp
+            if clip_denoised:
+                x0_pred = torch.clamp(x0_pred, self.data_min, self.data_max)
+
+            if t_prev < 0:
+                x_t = x0_pred
+                continue
+
+            acp_t         = self._extract(self.alphas_cumprod, t_tensor, x_t.shape)
+            t_prev_tensor = torch.full((B,), t_prev, device=device, dtype=torch.long)
+            acp_prev      = self._extract(self.alphas_cumprod, t_prev_tensor, x_t.shape)
+
+            sigma  = eta * torch.sqrt(
+                (1.0 - acp_prev) / (1.0 - acp_t) * (1.0 - acp_t / acp_prev)
+            )
+            dir_xt  = torch.sqrt(torch.clamp(1.0 - acp_prev - sigma ** 2, min=0.0)) * eps
+            noise_s = torch.randn_like(x_t) if eta > 0 else torch.zeros_like(x_t)
+            x_t     = torch.sqrt(acp_prev) * x0_pred + dir_xt + sigma * noise_s
 
         return x_t
 

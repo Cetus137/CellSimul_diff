@@ -28,6 +28,10 @@ WORK_DIR="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff"
 # Directories to scan (space-separated; both train splits)
 PATCHES_DIRS=(
     "data_live_node1_3d/train"
+    "data_live_node1_3d/val"
+    "data_live_node1_3d/test"
+    "data_live_node2_3d/test"
+    "data_live_node2_3d/val"
     "data_live_node2_3d/train"
 )
 
@@ -35,7 +39,10 @@ PATCHES_DIRS=(
 STATS_OUTPUT="centre_stats_3d.yaml"
 
 # Number of histogram bins for marginal KDE grids
-N_BINS=16
+N_BINS=32
+
+# Number of bins per axis for the joint 3D density grid (stored as N_BINS_JOINT^3)
+N_BINS_JOINT=16
 
 # Optional: cap the number of patches processed (comment out for full scan)
 # MAX_PATCHES=500
@@ -66,7 +73,8 @@ echo ""
 CMD="python scripts/analyze_training_stats.py \
     --patches_dir ${PATCHES_DIRS[*]} \
     --save_stats \"$STATS_OUTPUT\" \
-    --n_bins $N_BINS"
+    --n_bins $N_BINS \
+    --n_bins_3d $N_BINS_JOINT"
 
 # Uncomment to cap the number of patches (faster for a quick check):
 # CMD="$CMD --max_patches $MAX_PATCHES"

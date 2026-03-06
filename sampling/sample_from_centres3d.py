@@ -35,12 +35,15 @@ def load_model3d(checkpoint_path: str, config_path: str, device: str = "cuda") -
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     
-    # Determine input channels
+    # Determine input channels.
+    # condition_channels = n_geom_channels + (1 if prev_frame else 0)
     conditioning_cfg = config.get('unet', {}).get('conditioning')
+    prev_frame = bool(config.get('unet', {}).get('prev_frame', False))
     if conditioning_cfg is not None:
-        condition_channels = sum([v for v in conditioning_cfg.values()])
+        n_geom = sum(1 for v in conditioning_cfg.values() if v)
     else:
-        condition_channels = 3  # default: heatmap + distance + boundary
+        n_geom = 2  # legacy default: heatmap + distance
+    condition_channels = n_geom + (1 if prev_frame else 0)
     
     # Create U-Net
     unet = ConditionalUNet3D(
@@ -122,7 +125,19 @@ def sample_from_centres3d(
     )
 
     # Prepare conditioning tensor
-    condition = torch.from_numpy(condition_maps).unsqueeze(0).to(device)  # (1, C, D, H, W)
+    condition = torch.from_numpy(condition_maps).unsqueeze(0).to(device)  # (1, C_geom, D, H, W)
+
+    # When the model was trained with prev_frame=True (unified model), a zero
+    # volume is appended as the prev-frame channel, signalling frame-0 inference
+    # (i.e. no previous frame available).
+    prev_frame = getattr(model.model, '_prev_frame_flag', None)
+    if prev_frame is None:
+        # Fall back: infer from model's condition_channels vs. conditioning maps
+        model_cond_ch = int(getattr(model.model, 'condition_channels', condition.shape[1]))
+        prev_frame = model_cond_ch == condition.shape[1] + 1
+    if prev_frame:
+        zeros = torch.zeros_like(condition[:, :1])   # (1, 1, D, H, W)
+        condition = torch.cat([condition, zeros], dim=1)
 
     # Route to DDIM or DDPM depending on ddim_steps.
     # NOTE: FP16 autocast is intentionally NOT used — the model was trained in FP32
@@ -216,7 +231,14 @@ def sample_batch_from_centres3d(
         )
         condition_maps_list.append(cmap)
 
-    condition = torch.from_numpy(np.stack(condition_maps_list, axis=0)).to(device)
+    condition = torch.from_numpy(np.stack(condition_maps_list, axis=0)).to(device)  # (B, C_geom, D, H, W)
+
+    # Append zero prev-frame channel when the model expects it (unified model, frame-0 mode).
+    model_cond_ch = int(getattr(model.model, 'condition_channels', condition.shape[1]))
+    if model_cond_ch == condition.shape[1] + 1:
+        zeros = torch.zeros(condition.shape[0], 1, *condition.shape[2:],
+                            dtype=condition.dtype, device=condition.device)
+        condition = torch.cat([condition, zeros], dim=1)
 
     # NOTE: FP16 autocast is intentionally NOT used — the model was trained in FP32
     # and small FP16 precision errors accumulate across denoising steps, producing
@@ -247,4 +269,104 @@ def sample_batch_from_centres3d(
         for b in range(B)
     ]
 
+    return volumes, metadatas
+
+
+@torch.no_grad()
+def sample_batch_img2img3d(
+    model: DDPM3D,
+    source_volumes: list,
+    centres_list: list,
+    t_start: int = 250,
+    volume_size: int = 128,
+    heatmap_sigma: float = 3.0,
+    active_channels: Optional[dict] = None,
+    device: str = "cuda",
+    use_ddim: bool = False,
+    ddim_steps: int = 50,
+    ddim_eta: float = 0.0,
+) -> Tuple[list, list]:
+    """
+    SDEdit img2img batch: corrupt source volumes to t_start, then denoise
+    conditioned on target centres C_{t+1}.
+
+    Args:
+        model:           Loaded DDPM3D model.
+        source_volumes:  B source volumes as numpy arrays (D, H, W), normalised
+                         to [-1, 1] to match the model's training range.
+        centres_list:    B centre arrays for the *target* frame (C_{t+1}),
+                         each of shape (N, 3).
+        t_start:         Forward-noise level (100-400 recommended).
+                         Lower = more faithful to source; higher = more change.
+        volume_size:     Spatial size (assumes cubic volumes).
+        heatmap_sigma:   Gaussian sigma for centre heatmap conditioning.
+        active_channels: Channel config dict passed to generate_conditioning_maps3d.
+        device:          'cuda' or 'cpu'.
+        use_ddim:        Use DDIM instead of full DDPM (much faster).
+        ddim_steps:      Reference DDIM step count (only used when use_ddim=True).
+        ddim_eta:        DDIM stochasticity; 0.0 = deterministic.
+
+    Returns:
+        (volumes, metadatas) — same structure as sample_batch_from_centres3d.
+    """
+    model.eval()
+    B = len(source_volumes)
+    assert len(centres_list) == B, "source_volumes and centres_list must be same length"
+    volume_shape = (volume_size, volume_size, volume_size)
+
+    # Build conditioning maps from target centres C_{t+1}
+    condition_maps_list = []
+    for centres in centres_list:
+        cmap = generate_conditioning_maps3d(
+            centres=centres,
+            volume_shape=volume_shape,
+            heatmap_sigma=heatmap_sigma,
+            active_channels=active_channels,
+        )
+        condition_maps_list.append(cmap)
+
+    condition = torch.from_numpy(
+        np.stack(condition_maps_list, axis=0)
+    ).float().to(device)  # (B, C_geom, D, H, W)
+
+    # Append zero prev-frame channel when model expects it (unified model, frame-0 mode).
+    model_cond_ch = int(getattr(model.model, 'condition_channels', condition.shape[1]))
+    if model_cond_ch == condition.shape[1] + 1:
+        zeros = torch.zeros(condition.shape[0], 1, *condition.shape[2:],
+                            dtype=condition.dtype, device=condition.device)
+        condition = torch.cat([condition, zeros], dim=1)
+
+    # Stack source volumes: (B, 1, D, H, W)
+    src_array = np.stack([v[np.newaxis] for v in source_volumes], axis=0)
+    x_0 = torch.from_numpy(src_array).float().to(device)
+
+    if use_ddim:
+        samples = model.sample_img2img_ddim(
+            x_0=x_0,
+            t_start=t_start,
+            conditioning=condition,
+            ddim_steps=ddim_steps,
+            eta=ddim_eta,
+        )
+    else:
+        samples = model.sample_img2img(
+            x_0=x_0,
+            t_start=t_start,
+            conditioning=condition,
+        )
+
+    volumes = [samples[b, 0].cpu().numpy() for b in range(B)]
+
+    metadatas = [
+        {
+            'centres': centres_list[b],
+            'condition_maps': condition_maps_list[b],
+            'num_cells': len(centres_list[b]),
+            't_start': t_start,
+            'use_ddim': use_ddim,
+            'ddim_steps': ddim_steps if use_ddim else None,
+            'ddim_eta': ddim_eta if use_ddim else None,
+        }
+        for b in range(B)
+    ]
     return volumes, metadatas

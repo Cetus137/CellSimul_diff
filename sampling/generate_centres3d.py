@@ -190,6 +190,51 @@ def _sample_from_marginal(
     return (coord_min + normalised * (coord_max - coord_min)).astype(np.float32)
 
 
+def _sample_from_joint3d(
+    grid_3d: np.ndarray,
+    n_samples: int,
+    z_min: float, z_max: float,
+    y_min: float, y_max: float,
+    x_min: float, x_max: float,
+) -> np.ndarray:
+    """
+    Draw n_samples positions from a joint 3D density histogram.
+
+    Args:
+        grid_3d:  (B, B, B) normalised probability array (sums ~1).
+        n_samples: Number of (z, y, x) triples to draw.
+        z_min / z_max: Output range for z coordinates (voxels).
+        y_min / y_max: Output range for y coordinates (voxels).
+        x_min / x_max: Output range for x coordinates (voxels).
+
+    Returns:
+        samples: (n_samples, 3) float32 array, columns = [z, y, x].
+    """
+    B = grid_3d.shape[0]
+    flat = grid_3d.ravel().astype(np.float64)
+    flat /= flat.sum()                             # exact normalisation
+
+    # Sample flat bin indices according to the joint probability
+    bin_indices = np.random.choice(flat.size, size=n_samples, p=flat)
+
+    # Decode flat index → (iz, iy, ix)
+    iz = bin_indices // (B * B)
+    iy = (bin_indices // B) % B
+    ix = bin_indices % B
+
+    # Jitter uniformly within each bin (bin width = 1/B in normalised space)
+    bw = 1.0 / B
+    z_norm = iz * bw + np.random.uniform(0.0, bw, size=n_samples)
+    y_norm = iy * bw + np.random.uniform(0.0, bw, size=n_samples)
+    x_norm = ix * bw + np.random.uniform(0.0, bw, size=n_samples)
+
+    z = (z_min + z_norm * (z_max - z_min)).astype(np.float32)
+    y = (y_min + y_norm * (y_max - y_min)).astype(np.float32)
+    x = (x_min + x_norm * (x_max - x_min)).astype(np.float32)
+
+    return np.stack([z, y, x], axis=1)
+
+
 def generate_realistic_centres3d(
     volume_shape: Tuple[int, int, int],
     n_mean: float,
@@ -200,6 +245,8 @@ def generate_realistic_centres3d(
     density_grid_z: List[float],
     density_grid_y: List[float],
     density_grid_x: List[float],
+    density_grid_3d: Optional[List[float]] = None,
+    n_bins_joint: int = 16,
     border_margin: int = 10,
     max_attempts: int = 50,
     seed: Optional[int] = None,
@@ -227,6 +274,12 @@ def generate_realistic_centres3d(
         density_grid_z:  Marginal histogram over z (any length >= 2, sums to 1).
         density_grid_y:  Marginal histogram over y.
         density_grid_x:  Marginal histogram over x.
+        density_grid_3d: Optional joint 3D histogram (n_bins_joint^3 values,
+                         row-major z/y/x order, as produced by
+                         analyze_training_stats.py --n_bins_3d N).  When
+                         provided this replaces the three independent marginals,
+                         preserving spatial correlations between axes.
+        n_bins_joint:    Cube root of len(density_grid_3d) (default 16).
         border_margin:   Voxels excluded from each edge.
         max_attempts:    Max fresh candidates tried before declaring the volume
                          full and returning whatever has been accepted so far.
@@ -245,6 +298,13 @@ def generate_realistic_centres3d(
     y_min, y_max = float(border_margin), float(h - border_margin)
     x_min, x_max = float(border_margin), float(w - border_margin)
 
+    # Pre-build joint grid if supplied
+    _joint_grid: Optional[np.ndarray] = None
+    if density_grid_3d is not None:
+        _joint_grid = np.asarray(density_grid_3d, dtype=np.float32).reshape(
+            n_bins_joint, n_bins_joint, n_bins_joint
+        )
+
     # --- Sample target N from truncated Normal ---
     n_target = int(np.round(np.random.normal(n_mean, n_std)))
     n_target = int(np.clip(n_target, n_min, n_max))
@@ -254,12 +314,19 @@ def generate_realistic_centres3d(
     consecutive_failures = 0
 
     while len(accepted) < n_target:
-        # Draw a batch of candidates from marginal KDE
+        # Draw a batch of candidates from joint 3D grid (preferred) or
+        # independent marginals (fallback when joint grid not available)
         batch = max(n_target * 4, 64)
-        cz = _sample_from_marginal(density_grid_z, batch, z_min, z_max)
-        cy = _sample_from_marginal(density_grid_y, batch, y_min, y_max)
-        cx = _sample_from_marginal(density_grid_x, batch, x_min, x_max)
-        candidates = np.stack([cz, cy, cx], axis=1)  # (batch, 3)
+        if _joint_grid is not None:
+            candidates = _sample_from_joint3d(
+                _joint_grid, batch,
+                z_min, z_max, y_min, y_max, x_min, x_max,
+            )
+        else:
+            cz = _sample_from_marginal(density_grid_z, batch, z_min, z_max)
+            cy = _sample_from_marginal(density_grid_y, batch, y_min, y_max)
+            cx = _sample_from_marginal(density_grid_x, batch, x_min, x_max)
+            candidates = np.stack([cz, cy, cx], axis=1)  # (batch, 3)
 
         batch_accepted = 0
         for pt in candidates:

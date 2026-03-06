@@ -340,16 +340,18 @@ Examples:
     # Load data-derived centre generation statistics (populated by analyze_training_stats.py)
     cg_cfg = cfg.get('centre_generation_3d', {})
     realistic_params = {
-        'n_mean':         cg_cfg.get('n_mean',        20.0),
-        'n_std':          cg_cfg.get('n_std',          8.0),
-        'n_min':          cg_cfg.get('n_min',          5),
-        'n_max':          cg_cfg.get('n_max',          60),
-        'min_distance':   cg_cfg.get('min_distance',   8.0),
-        'density_grid_z': cg_cfg.get('density_grid_z', [1.0] * 16),
-        'density_grid_y': cg_cfg.get('density_grid_y', [1.0] * 16),
-        'density_grid_x': cg_cfg.get('density_grid_x', [1.0] * 16),
-        'border_margin':  cg_cfg.get('border_margin',  10),
-        'max_attempts':   cg_cfg.get('max_attempts',   50),
+        'n_mean':          cg_cfg.get('n_mean',        20.0),
+        'n_std':           cg_cfg.get('n_std',          8.0),
+        'n_min':           cg_cfg.get('n_min',          5),
+        'n_max':           cg_cfg.get('n_max',          60),
+        'min_distance':    cg_cfg.get('min_distance',   8.0),
+        'density_grid_z':  cg_cfg.get('density_grid_z', [1.0] * 16),
+        'density_grid_y':  cg_cfg.get('density_grid_y', [1.0] * 16),
+        'density_grid_x':  cg_cfg.get('density_grid_x', [1.0] * 16),
+        'density_grid_3d': cg_cfg.get('density_grid_3d', None),
+        'n_bins_joint':    cg_cfg.get('n_bins_joint',   16),
+        'border_margin':   cg_cfg.get('border_margin',  10),
+        'max_attempts':    cg_cfg.get('max_attempts',   50),
     }
     
     # Handle CFG flag
@@ -386,7 +388,7 @@ Examples:
             else:
                 logger.warning(
                     f"from_file: single file with num_samples={args.num_samples}. "
-                    "Each sample will receive Gaussian-jittered centres (sigma=1 voxel). "
+                    "Each sample will receive Gaussian-jittered centres (sigma=0 voxel). "
                     "Pass a directory of .npy files to use distinct centre sets."
                 )
     elif args.method == 'realistic':
@@ -464,7 +466,7 @@ Examples:
                 else:
                     c = np.load(cf_path).astype(np.float32)
                     if args.num_samples > 1 and bi > 0:
-                        jitter = np.random.normal(0.0, 1.0, c.shape).astype(np.float32)
+                        jitter = np.random.normal(0.0, 0.0, c.shape).astype(np.float32)
                         c = np.clip(c + jitter, 10, volume_size - 10)
                     return c
             elif args.method == 'realistic':

@@ -3,15 +3,18 @@
 #SBATCH --output=slogs/generate_3d_%j.out
 #SBATCH --error=slogs/generate_3d_%j.err
 #SBATCH --time=00:30:00
-#SBATCH --partition=short
-##SBATCH --gpus-per-node=1
-##SBATCH --constraint="a100|rtx8000|v100"
-##SBATCH --mem-per-gpu=10G
+#SBATCH --partition=gpu_short
+#SBATCH --gpus-per-node=1
+#SBATCH --constraint="a100|rtx8000|v100"
+#SBATCH --mem-per-gpu=10G
 #SBATCH --cpus-per-task=2
 
 # 3D Cell Diffusion Model - Synthetic Volume Generation
 # Generates synthetic 3D cell microscopy volumes from trained model
-# Uses Poisson disk sampling for realistic cell centre distributions
+# Centre methods: simple, poisson, training_dist, from_file, realistic
+#   realistic   -> params from configs/frame1_3d.yaml (centre_generation_3d block)
+#   poisson     -> uses DENSITY + MIN_DISTANCE
+#   training_dist -> uses MIN_DISTANCE only
 
 
 # Load required modules
@@ -24,17 +27,15 @@ source ~/devel/venv/Python-3.10.8-GCCcore-12.2.0/cell_simul_env/bin/activate
 # Configuration
 CHECKPOINT="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/checkpoints/frame1_3d_combined_noD_noZ_raw/best.pt"
 NUM_SAMPLES=100
-OUTPUT_DIR="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/synthetic_cells_3d/noZ_raw/batch2"
+OUTPUT_DIR="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/synthetic_cells_3d/noZ_raw/from_test"
 METHOD="realistic"  # Options: simple, poisson, training_dist, from_file, realistic
-#CENTRES_FILE="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/test/patch3d_f0005_00000_centres.npy"   # Only needed if METHOD=from_file
-DENSITY=0.00001   # Cells per voxel (default ~20 cells in 128³)
-MIN_DISTANCE=8.0  # Minimum spacing between cells (voxels)
+CENTRES_FILE="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/test/patch3d_f0005_00000_centres.npy"   # Only needed if METHOD=from_file
+
 GUIDANCE_SCALE=0.0
 DDIM_STEPS=0             # DDIM steps per volume; set to 0 to use full DDPM-1000
-BATCH_SIZE=4             # Volumes per GPU pass — ~2x throughput; use 1 if VRAM OOM
+BATCH_SIZE=1             # Volumes per GPU pass — ~2x throughput; use 1 if VRAM OOM
 CONFIG="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/configs/frame1_3d.yaml"
-
-DEVICE="cpu" 
+DEVICE="cuda"            # "cuda" or "cpu"
 
 # Run inference
 echo ""
@@ -50,12 +51,19 @@ CMD="python /users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/scr
     --num_samples \"$NUM_SAMPLES\" \
     --output_dir \"$OUTPUT_DIR\" \
     --method \"$METHOD\" \
-    --density \"$DENSITY\" \
-    --min_distance \"$MIN_DISTANCE\" \
     --guidance_scale \"$GUIDANCE_SCALE\" \
     --ddim_steps \"$DDIM_STEPS\" \
     --config \"$CONFIG\" \
     --device \"$DEVICE\""
+
+# density/min_distance: only used by poisson and training_dist methods
+# (realistic reads these from the config's centre_generation_3d block instead)
+if [ "$METHOD" == "poisson" ] || [ "$METHOD" == "training_dist" ]; then
+    CMD="$CMD --min_distance \"$MIN_DISTANCE\""
+fi
+if [ "$METHOD" == "poisson" ]; then
+    CMD="$CMD --density \"$DENSITY\""
+fi
 
 # Add centres file if using from_file method
 if [ "$METHOD" == "from_file" ] && [ -n "$CENTRES_FILE" ]; then
@@ -72,10 +80,7 @@ CMD="$CMD --batch_size \"$BATCH_SIZE\""
 CMD="$CMD --no_visualization"
 
 # Skip saving _heatmap.tif conditioning files (saves disk I/O and storage)
-CMD="$CMD --no_heatmap"
-
-# Disable visualization (add --no_visualization to skip PNG generation)
-# By default, generates XY/XZ/YZ orthogonal slice visualizations with centres
+#CMD="$CMD --no_heatmap"
 
 eval $CMD
 

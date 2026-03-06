@@ -516,16 +516,18 @@ def main():
                 "--save_stats to populate real values."
             )
         realistic_params = {
-            "n_mean":         cg_cfg.get("n_mean",        20.0),
-            "n_std":          cg_cfg.get("n_std",          8.0),
-            "n_min":          cg_cfg.get("n_min",          5),
-            "n_max":          cg_cfg.get("n_max",          60),
-            "min_distance":   cg_cfg.get("min_distance",   8.0),
-            "density_grid_z": cg_cfg.get("density_grid_z", [1.0] * 16),
-            "density_grid_y": cg_cfg.get("density_grid_y", [1.0] * 16),
-            "density_grid_x": cg_cfg.get("density_grid_x", [1.0] * 16),
-            "border_margin":  cg_cfg.get("border_margin",  10),
-            "max_attempts":   cg_cfg.get("max_attempts",   50),
+            "n_mean":          cg_cfg.get("n_mean",        20.0),
+            "n_std":           cg_cfg.get("n_std",          8.0),
+            "n_min":           cg_cfg.get("n_min",          5),
+            "n_max":           cg_cfg.get("n_max",          60),
+            "min_distance":    cg_cfg.get("min_distance",   8.0),
+            "density_grid_z":  cg_cfg.get("density_grid_z", [1.0] * 16),
+            "density_grid_y":  cg_cfg.get("density_grid_y", [1.0] * 16),
+            "density_grid_x":  cg_cfg.get("density_grid_x", [1.0] * 16),
+            "density_grid_3d": cg_cfg.get("density_grid_3d", None),
+            "n_bins_joint":    cg_cfg.get("n_bins_joint",   16),
+            "border_margin":   cg_cfg.get("border_margin",  10),
+            "max_attempts":    cg_cfg.get("max_attempts",   50),
         }
 
         rng = np.random.default_rng(args.seed)

@@ -3,8 +3,8 @@
 #SBATCH --partition=gpu_short
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem-per-gpu=8G
-#SBATCH --time=00:30:00
+#SBATCH --mem-per-gpu=16G
+#SBATCH --time=00:45:00
 #SBATCH --output=slogs/eval_encoder_3d.%j.out
 #SBATCH --error=slogs/eval_encoder_3d.%j.err
 #SBATCH --exclude=compg009,compg010,compg011,compg013
@@ -33,12 +33,12 @@ cd $WORK_DIR
 # ── Configuration ──────────────────────────────────────────────────────────────
 REAL_DIR1="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/test"
 
-SYN_DIR="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_synthetic_3D_frame1_volumes/no_z_raw"
+SYN_DIR="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/synthetic_cells_3d/noZ_raw/from_test2"  # Must match the output dir used in slurm_generate_3d.sl
 
 CKPT="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/checkpoints/frame1_3d_combined_noD_noZ_raw/best.pt"
 CONFIG="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/configs/frame1_3d.yaml"
 
-EVAL_OUT_DIR="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/evaluation/results_noZ_raw/encoder"
+EVAL_OUT_DIR="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/evaluation/results_noZ_raw/from_test/encoder"
 
 # Volumes per encoder forward pass — reduce to 2 if GPU OOM
 BATCH_SIZE=4

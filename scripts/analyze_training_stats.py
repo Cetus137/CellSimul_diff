@@ -46,12 +46,42 @@ def _marginal_histogram(coords_normalised: np.ndarray, n_bins: int = 16) -> np.n
     return (counts / counts.sum()).astype(np.float32)
 
 
+def _joint3d_histogram(
+    z_norm: np.ndarray,
+    y_norm: np.ndarray,
+    x_norm: np.ndarray,
+    n_bins: int = 16,
+) -> np.ndarray:
+    """
+    Build a normalised 3D joint histogram from (0,1)-normalised coordinates.
+
+    Args:
+        z_norm, y_norm, x_norm: 1-D arrays in [0, 1]
+        n_bins: Number of bins per axis (total bins = n_bins^3).
+
+    Returns:
+        grid: (n_bins, n_bins, n_bins) float32 array summing to 1.0.
+              Zero-count bins are raised to a small positive floor so all
+              regions remain reachable during generation.
+    """
+    coords = np.stack([z_norm, y_norm, x_norm], axis=1)
+    counts, _ = np.histogramdd(coords, bins=n_bins, range=[(0.0, 1.0)] * 3)
+    floor = max(counts.max() * 0.01, 1.0)
+    counts = np.maximum(counts, floor)
+    return (counts / counts.sum()).astype(np.float32)
+
+
 def _collect_statistics(patches_dirs, max_patches=None):
     """Load all centre files from one or more train directories and collect stats."""
     all_files = []
     for d in patches_dirs:
         d = Path(d)
+        # Support both single-frame patches (*_centres.npy) and
+        # temporal pairs (*_centres_t0.npy / *_centres_t1.npy).
+        # Use only t0 from pairs to avoid double-counting the same tissue.
         found = sorted(d.glob("*_centres.npy"))
+        if not found:
+            found = sorted(d.glob("*_centres_t0.npy"))
         print(f"  {d}: {len(found)} centre files")
         all_files.extend(found)
 
@@ -138,6 +168,11 @@ def main():
         '--n_bins', type=int, default=16,
         help='Number of histogram bins for marginal KDE grids (default: 16)'
     )
+    parser.add_argument(
+        '--n_bins_3d', type=int, default=16,
+        help='Number of bins per axis for joint 3D density histogram '
+             '(default: 16; produces n_bins_3d^3 = 4096 entries stored flat in YAML)'
+    )
     args = parser.parse_args()
 
     print("=" * 65)
@@ -173,6 +208,17 @@ def main():
         print(f"  {name} peak/trough ratio: {ratio:.2f}  "
               f"({'significant spatial variation' if ratio > 2 else 'roughly uniform'})")
 
+    # ── Joint 3D density histogram ────────────────────────────────────────────
+    grid_3d = _joint3d_histogram(z_norm, y_norm, x_norm, args.n_bins_3d)
+    n_total = grid_3d.size
+    n_nonzero = int((grid_3d > 0).sum())
+    print(f"\nJoint 3D density grid ({args.n_bins_3d}^3 = {n_total} bins):")
+    print(f"  non-zero bins: {n_nonzero} / {n_total} "
+          f"({100.0 * n_nonzero / n_total:.1f}%)")
+    print(f"  peak value:    {float(grid_3d.max()):.6f}")
+    print(f"  floor value:   {float(grid_3d.min()):.6f}")
+    print(f"  peak/floor:    {grid_3d.max() / grid_3d.min():.1f}")
+
     # ── Recommended config values ─────────────────────────────────────────────
     n_mean   = float(cell_counts.mean())
     n_std    = float(cell_counts.std())
@@ -204,6 +250,10 @@ def main():
                 'density_grid_z': [round(float(v), 6) for v in grid_z],
                 'density_grid_y': [round(float(v), 6) for v in grid_y],
                 'density_grid_x': [round(float(v), 6) for v in grid_x],
+                # Joint 3D grid (n_bins_joint^3 values, row-major z/y/x order)
+                # Reshape to (n_bins_joint, n_bins_joint, n_bins_joint) in generation
+                'n_bins_joint':   args.n_bins_3d,
+                'density_grid_3d': [round(float(v), 8) for v in grid_3d.ravel()],
             }
         }
         out_path = Path(args.save_stats)
