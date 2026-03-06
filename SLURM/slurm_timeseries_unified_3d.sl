@@ -68,7 +68,7 @@ HEATMAP_SIGMA=3.0
 METHOD="realistic"
 
 # Inter-frame Gaussian displacement std-dev (voxels) — only used when METHOD=realistic
-DISPLACEMENT_SIGMA=2.5
+DISPLACEMENT_SIGMA=10
 
 # Random seed for centre generation (leave empty for a random seed each run)
 SEED=""
@@ -84,6 +84,16 @@ MATCH_HISTOGRAMS=true
 # prev-frame channel is active. 0.3 = heatmap drives placement for 70% of steps,
 # prev_vol contributes texture for the final 30%. 1.0 = always active (no change).
 PREV_VOL_ACTIVE_FRAC=0.3
+
+# Number of independent timeseries to generate.
+# With METHOD=realistic each sample gets its own centre sequence.
+# With METHOD=from_files all samples share the same centres; diversity comes from diffusion noise.
+NUM_SAMPLES=4
+
+# How many samples to process simultaneously as a GPU batch.
+# Higher = faster but uses proportionally more GPU memory.
+# Rule of thumb: 4 samples × 128^3 at float32 ≈ 2 GB extra VRAM.
+SAMPLE_BATCH_SIZE=4
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -108,6 +118,7 @@ echo "PREV_VOL_ACTIVE_FRAC: $PREV_VOL_ACTIVE_FRAC"
 echo "displacement_sigma: $DISPLACEMENT_SIGMA"
 echo "Method:     $METHOD  (centres_dir=$CENTRES_DIR  sigma=$DISPLACEMENT_SIGMA)"
 echo "Frames:     $NUM_FRAMES  (t=$START_T … t=$(( START_T + NUM_FRAMES - 1 )))"
+echo "Samples:    $NUM_SAMPLES  (batch_size=$SAMPLE_BATCH_SIZE)"
 echo "Output:     $OUT_DIR"
 echo "========================================================"
 
@@ -127,7 +138,9 @@ CMD="python scripts/generate_timeseries_unified_3d.py \
     --heatmap_sigma $HEATMAP_SIGMA \
     --guidance_scale $GUIDANCE_SCALE \
     --guidance_scale_t0 $GUIDANCE_SCALE_T0 \
-    --prev_vol_active_frac $PREV_VOL_ACTIVE_FRAC"
+    --prev_vol_active_frac $PREV_VOL_ACTIVE_FRAC \
+    --num_samples $NUM_SAMPLES \
+    --sample_batch_size $SAMPLE_BATCH_SIZE"
 
 if [ "$USE_CFG" = "true" ]; then
     CMD="$CMD --cfg"
@@ -159,7 +172,7 @@ EXIT_CODE=$?
 echo ""
 echo "========================================================"
 if [ $EXIT_CODE -eq 0 ]; then
-    echo "Generation complete!"
+    echo "Generation complete!  ($NUM_SAMPLES sample(s))"
     echo "Volumes written to: $OUT_DIR"
 else
     echo "Generation FAILED with exit code $EXIT_CODE"

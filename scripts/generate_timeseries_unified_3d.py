@@ -189,37 +189,21 @@ def find_centres_files(
 # Single-frame sampler
 # ──────────────────────────────────────────────────────────────────────────────
 
-@torch.no_grad()
-def sample_frame(
-    model,
+def build_frame_conditioning(
     centres: np.ndarray,
     volume_shape: tuple,
-    prev_vol: Optional[torch.Tensor],   # None → frame 0; (1,1,D,H,W) in [-1,1] otherwise
+    prev_vol: Optional[torch.Tensor],
     active_geom: dict,
     heatmap_sigma: float,
     distance_percentile: float,
-    use_cfg: bool,
-    guidance_scale: float,
     device: str,
-    prev_vol_active_frac: float = 1.0,
 ) -> torch.Tensor:
     """
-    Sample one frame.
+    Build a ``(1, C, D, H, W)`` conditioning tensor for a single sample.
 
-    Conditioning:
-        Channel 0: heatmap of `centres` in [0,1]
-        Channel 1: prev_vol rescaled to [0,1]  (zeros when prev_vol is None)
-
-    Args:
-        prev_vol_active_frac: Fraction of denoising steps (counting from t=0)
-            during which ch1 (prev_vol) is active. E.g. 0.3 keeps ch1 zeroed
-            for the first 70% of steps (global structure driven by heatmap) and
-            restores it for the final 30% (texture refinement). 1.0 = no effect.
-            Automatically a no-op when prev_vol is None (frame 0).
-
-    Returns: (1, 1, D, H, W) float32 tensor in [-1, 1].
+    Channel 0: Gaussian heatmap of ``centres`` in [0, 1].
+    Channel 1: ``prev_vol`` rescaled to [0, 1]; zeros when ``prev_vol is None``.
     """
-    # Build geometry conditioning: (1, n_geom, D, H, W)
     geom = centres_to_cond_3d(
         centres=centres,
         volume_shape=volume_shape,
@@ -229,31 +213,71 @@ def sample_frame(
         device=device,
         batch_size=1,
     )
+    prev_ch = (
+        torch.zeros(1, 1, *volume_shape, device=device)
+        if prev_vol is None
+        else (prev_vol * 0.5 + 0.5).clamp(0.0, 1.0)   # [-1,1] → [0,1]
+    )
+    return torch.cat([geom, prev_ch], dim=1)  # (1, C, D, H, W)
 
-    # Build prev-frame channel: zeros for frame 0, real volume for subsequent frames
-    if prev_vol is None:
-        prev_ch = torch.zeros(1, 1, *volume_shape, device=device)
-    else:
-        prev_ch = (prev_vol * 0.5 + 0.5).clamp(0.0, 1.0)  # [-1,1] → [0,1]
 
-    # Concatenate: (1, n_geom+1, D, H, W)
-    conditioning = torch.cat([geom, prev_ch], dim=1)
+@torch.no_grad()
+def run_model_batch(
+    model,
+    conditioning: torch.Tensor,   # (B, C, D, H, W)
+    use_cfg: bool,
+    guidance_scale: float,
+    prev_vol_active_frac: float = 1.0,
+) -> torch.Tensor:
+    """
+    Run the diffusion model for a batch of conditionings.
 
-    # s=1 is mathematically identical to a single conditioned pass — skip the
-    # unconditional forward entirely to avoid wasting 2× compute.
+    ``guidance_scale == 1.0`` is mathematically identical to a single conditioned
+    pass, so the unconditioned forward is skipped in that case.
+
+    Returns: ``(B, 1, D, H, W)`` float32 tensor in [-1, 1].
+    """
     if use_cfg and guidance_scale != 1.0:
-        vol = model.sample_with_cfg(
+        return model.sample_with_cfg(
             conditioning=conditioning,
             guidance_scale=guidance_scale,
             prev_vol_active_frac=prev_vol_active_frac,
         )
-    else:
-        vol = model.sample(
-            conditioning=conditioning,
-            prev_vol_active_frac=prev_vol_active_frac,
-        )
+    return model.sample(
+        conditioning=conditioning,
+        prev_vol_active_frac=prev_vol_active_frac,
+    )
 
-    return vol  # (1, 1, D, H, W) in [-1, 1]
+
+@torch.no_grad()
+def sample_frame(
+    model,
+    centres: np.ndarray,
+    volume_shape: tuple,
+    prev_vol: Optional[torch.Tensor],
+    active_geom: dict,
+    heatmap_sigma: float,
+    distance_percentile: float,
+    use_cfg: bool,
+    guidance_scale: float,
+    device: str,
+    prev_vol_active_frac: float = 1.0,
+) -> torch.Tensor:
+    """
+    Sample one frame (single-sample convenience wrapper).
+
+    Returns: ``(1, 1, D, H, W)`` float32 tensor in [-1, 1].
+    """
+    conditioning = build_frame_conditioning(
+        centres=centres,
+        volume_shape=volume_shape,
+        prev_vol=prev_vol,
+        active_geom=active_geom,
+        heatmap_sigma=heatmap_sigma,
+        distance_percentile=distance_percentile,
+        device=device,
+    )
+    return run_model_batch(model, conditioning, use_cfg, guidance_scale, prev_vol_active_frac)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -369,6 +393,20 @@ def main():
         "--device", default=None,
         help="Device: cuda / cpu (auto-detected when omitted)"
     )
+    parser.add_argument(
+        "--num_samples", type=int, default=1,
+        help="Number of independent timeseries to generate. Each sample draws its own "
+             "centre sequence (--method realistic) or shares the file-based centres but "
+             "gets a different diffusion noise realisation (--method from_files). "
+             "When > 1, outputs are written to sample_NNNN/ subdirectories. (default: 1)"
+    )
+    parser.add_argument(
+        "--sample_batch_size", type=int, default=1,
+        help="Number of samples processed simultaneously as a GPU batch. Higher values "
+             "reduce wall time but require proportionally more GPU memory. "
+             "Must divide --num_samples cleanly or the last batch will be smaller. "
+             "(default: 1)"
+    )
     args = parser.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -401,13 +439,18 @@ def main():
     # ── Build centres sequence ─────────────────────────────────────────────────
     volume_shape = (args.volume_size, args.volume_size, args.volume_size)
 
+    # ── Build ALL centre sequences (one per sample) ───────────────────────────
+    all_centre_sequences: List[List[np.ndarray]] = []
+
     if args.method == "from_files":
         if args.centres_dir is None:
             parser.error("--centres_dir is required when --method from_files")
         centres_dir = Path(args.centres_dir)
         centres_files = find_centres_files(centres_dir, args.start_t, args.num_frames)
         logger.info("Found %d centre files starting at t=%d", len(centres_files), args.start_t)
-        centres_sequence = [np.load(p).astype(np.float32) for p in centres_files]
+        _base_seq = [np.load(p).astype(np.float32) for p in centres_files]
+        # All samples share the same spatial centres; diversity comes from diffusion noise.
+        all_centre_sequences = [_base_seq] * args.num_samples
 
     else:  # realistic
         cg = cfg.get("centre_generation_3d")
@@ -419,142 +462,182 @@ def main():
             )
         rng = np.random.default_rng(args.seed)
         border_margin = int(cg.get("border_margin", 10))
-
-        # Frame 0: draw from training-data statistics
-        c0 = generate_realistic_centres3d(
-            volume_shape=volume_shape,
-            n_mean=float(cg["n_mean"]),
-            n_std=float(cg["n_std"]),
-            n_min=int(cg["n_min"]),
-            n_max=int(cg["n_max"]),
-            min_distance=float(cg["min_distance"]),
-            density_grid_z=cg["density_grid_z"],
-            density_grid_y=cg["density_grid_y"],
-            density_grid_x=cg["density_grid_x"],
-            density_grid_3d=cg.get("density_grid_3d"),
-            n_bins_joint=int(cg.get("n_bins_joint", 16)),
-            border_margin=border_margin,
-            max_attempts=int(cg.get("max_attempts", 50)),
-            seed=int(rng.integers(0, 2**31)),
-        )
-        logger.info(
-            "Frame-0 centres (realistic): %d cells  displacement_sigma=%.1f vox",
-            len(c0), args.displacement_sigma,
-        )
-
-        # Subsequent frames: Gaussian displacement of previous centres
         _disp_min_dist = float(cg.get("min_distance", 0.0))
         _disp_max_iter = int(cg.get("max_attempts", 50))
-        centres_sequence = [c0]
-        for _ in range(args.num_frames - 1):
-            centres_sequence.append(
-                displace_centres(
-                    centres_sequence[-1],
-                    sigma=args.displacement_sigma,
-                    volume_shape=volume_shape,
-                    border_margin=border_margin,
-                    rng=rng,
-                    min_distance=_disp_min_dist,
-                    max_iterations=_disp_max_iter,
-                )
-            )
 
-    # ── Autoregressive generation loop ────────────────────────────────────────
-    logger.info("=" * 60)
-    logger.info("Generating %d frames autoregressively  [method=%s]",
-                args.num_frames, args.method)
-    logger.info("=" * 60)
-
-    prev_vol: Optional[torch.Tensor] = None   # None → frame 0 uses zero prev-channel
-    all_volumes: List[np.ndarray] = []
-    all_heatmaps: List[np.ndarray] = []
-
-    for frame_idx, centres in enumerate(centres_sequence):
-        t = args.start_t + frame_idx
-
-        mode = "frame-0 (zero prev)" if prev_vol is None else f"conditioned on t={t-1}"
-        logger.info("Frame %d/%d  t=%04d  n_cells=%d  [%s]",
-                    frame_idx + 1, args.num_frames, t, len(centres), mode)
-
-        frame_guidance = (
-            args.guidance_scale_t0
-            if (args.guidance_scale_t0 is not None and prev_vol is None)
-            else args.guidance_scale
-        )
-        if frame_idx == 0 and args.guidance_scale_t0 is not None:
-            logger.info("  → frame-0 CFG scale: %.2f", frame_guidance)
-
-        vol = sample_frame(
-            model=model,
-            centres=centres,
-            volume_shape=volume_shape,
-            prev_vol=prev_vol,
-            active_geom=active_geom,
-            heatmap_sigma=args.heatmap_sigma,
-            distance_percentile=args.distance_percentile,
-            use_cfg=args.cfg,
-            guidance_scale=frame_guidance,
-            device=device,
-            prev_vol_active_frac=args.prev_vol_active_frac,
-        )
-        # vol: (1, 1, D, H, W) in [-1, 1]
-
-        # Optional histogram matching: match this frame's global statistics to
-        # the previous frame so that autoregressive intensity drift is suppressed.
-        # Applied in [-1,1] before both saving and prev_vol assignment so the
-        # conditioning tensor and the saved TIFF are always consistent.
-        if args.match_histograms and prev_vol is not None:
-            ref_np  = prev_vol[0, 0].cpu().numpy()           # (D,H,W) in [-1,1]
-            src_np  = vol[0, 0].cpu().numpy()                 # (D,H,W) in [-1,1]
-            matched = skimage_match_histograms(
-                src_np.astype(np.float64), ref_np.astype(np.float64)
-            )
-            matched = np.clip(matched, -1.0, 1.0).astype(np.float32)
-            vol = torch.from_numpy(matched).unsqueeze(0).unsqueeze(0).to(vol.device)
-            logger.info("  → histogram matched to t=%04d", t - 1)
-
-        # Save frame as TIFF in [0, 1]
-        vol_np = vol[0, 0].cpu().numpy()   # (D, H, W)
-        vol_01 = to_zero_one(vol_np).astype(np.float32)
-        tifffile.imwrite(str(out_dir / f"t{t:04d}_vol.tif"), vol_01)
-        np.save(str(out_dir / f"t{t:04d}_centres.npy"), centres)
-
-        if args.save_heatmaps:
-            heatmap = centres_to_cond_3d(
-                centres=centres,
+        for s in range(args.num_samples):
+            c0 = generate_realistic_centres3d(
                 volume_shape=volume_shape,
-                heatmap_sigma=args.heatmap_sigma,
-                distance_percentile=args.distance_percentile,
-                active_channels=active_geom,
-                device="cpu",
-                batch_size=1,
-            )[0, 0].numpy()  # (D, H, W) — channel 0 is always the heatmap
-            tifffile.imwrite(str(out_dir / f"t{t:04d}_heatmap.tif"), heatmap.astype(np.float32))
-            all_heatmaps.append(heatmap.astype(np.float32))
-            logger.info("  → saved t%04d_heatmap.tif", t)
+                n_mean=float(cg["n_mean"]),
+                n_std=float(cg["n_std"]),
+                n_min=int(cg["n_min"]),
+                n_max=int(cg["n_max"]),
+                min_distance=float(cg["min_distance"]),
+                density_grid_z=cg["density_grid_z"],
+                density_grid_y=cg["density_grid_y"],
+                density_grid_x=cg["density_grid_x"],
+                density_grid_3d=cg.get("density_grid_3d"),
+                n_bins_joint=int(cg.get("n_bins_joint", 16)),
+                border_margin=border_margin,
+                max_attempts=int(cg.get("max_attempts", 50)),
+                seed=int(rng.integers(0, 2**31)),  # independent seed per sample
+            )
+            seq: List[np.ndarray] = [c0]
+            for _ in range(args.num_frames - 1):
+                seq.append(
+                    displace_centres(
+                        seq[-1],
+                        sigma=args.displacement_sigma,
+                        volume_shape=volume_shape,
+                        border_margin=border_margin,
+                        rng=rng,
+                        min_distance=_disp_min_dist,
+                        max_iterations=_disp_max_iter,
+                    )
+                )
+            all_centre_sequences.append(seq)
+            logger.info(
+                "Sample %04d centre sequence: %d cells  displacement_sigma=%.1f vox",
+                s, len(c0), args.displacement_sigma,
+            )
 
-        all_volumes.append(vol_01)
-        logger.info("  → saved t%04d_vol.tif", t)
+    # ── Helper: per-sample output directory ───────────────────────────────────
+    def sample_out_dir(s: int) -> Path:
+        """Return (and create) the output directory for sample s."""
+        d = out_dir if args.num_samples == 1 else out_dir / f"sample_{s:04d}"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
-        # Pass this frame as the prev-frame conditioning for the next step
-        prev_vol = vol  # (1, 1, D, H, W) in [-1, 1], stays on device
-
-    # ── Save full timeseries stack ─────────────────────────────────────────────
+    # ── Autoregressive generation (batched across samples) ────────────────────
+    n_batches = (args.num_samples + args.sample_batch_size - 1) // args.sample_batch_size
     t_end = args.start_t + args.num_frames - 1
-    stack = np.stack(all_volumes, axis=0)   # (T, D, H, W)
-    stack_path = out_dir / f"timeseries_t{args.start_t:04d}-t{t_end:04d}.tif"
-    tifffile.imwrite(str(stack_path), stack)
+    logger.info("=" * 60)
+    logger.info(
+        "Generating %d sample(s) × %d frames  "
+        "[sample_batch_size=%d  n_batches=%d  method=%s]",
+        args.num_samples, args.num_frames,
+        args.sample_batch_size, n_batches, args.method,
+    )
+    logger.info("=" * 60)
 
-    if args.save_heatmaps and all_heatmaps:
-        heatmap_stack = np.stack(all_heatmaps, axis=0)   # (T, D, H, W)
-        heatmap_stack_path = out_dir / f"timeseries_heatmap_t{args.start_t:04d}-t{t_end:04d}.tif"
-        tifffile.imwrite(str(heatmap_stack_path), heatmap_stack)
-        logger.info("Heatmap stack:    %s  shape=%s", heatmap_stack_path.name, heatmap_stack.shape)
+    for batch_start in range(0, args.num_samples, args.sample_batch_size):
+        batch_idxs = list(range(
+            batch_start,
+            min(batch_start + args.sample_batch_size, args.num_samples)
+        ))
+        B = len(batch_idxs)
+        batch_num = batch_start // args.sample_batch_size + 1
+        logger.info("── Batch %d/%d  samples=%s", batch_num, n_batches, batch_idxs)
+
+        # Per-sample state for this batch
+        batch_prev_vols: List[Optional[torch.Tensor]] = [None] * B
+        batch_all_volumes: List[List[np.ndarray]] = [[] for _ in range(B)]
+        batch_all_heatmaps: List[List[np.ndarray]] = [[] for _ in range(B)]
+
+        for frame_idx in range(args.num_frames):
+            t = args.start_t + frame_idx
+            is_frame0 = (frame_idx == 0)
+
+            frame_guidance = (
+                args.guidance_scale_t0
+                if (args.guidance_scale_t0 is not None and is_frame0)
+                else args.guidance_scale
+            )
+            if is_frame0 and args.guidance_scale_t0 is not None:
+                logger.info("  Frame 0 CFG scale: %.2f", frame_guidance)
+
+            # Build stacked conditioning  (B, C, D, H, W)
+            cond_list = [
+                build_frame_conditioning(
+                    centres=all_centre_sequences[si][frame_idx],
+                    volume_shape=volume_shape,
+                    prev_vol=batch_prev_vols[b],
+                    active_geom=active_geom,
+                    heatmap_sigma=args.heatmap_sigma,
+                    distance_percentile=args.distance_percentile,
+                    device=device,
+                )
+                for b, si in enumerate(batch_idxs)
+            ]
+            cond_batch = torch.cat(cond_list, dim=0)  # (B, C, D, H, W)
+
+            # Single forward pass for all B samples
+            vols = run_model_batch(
+                model,
+                cond_batch,
+                use_cfg=args.cfg,
+                guidance_scale=frame_guidance,
+                prev_vol_active_frac=args.prev_vol_active_frac,
+            )  # (B, 1, D, H, W) in [-1, 1]
+
+            # ── Per-sample post-processing, histogram matching, save ──────────
+            for b, si in enumerate(batch_idxs):
+                vol = vols[b:b+1]  # (1, 1, D, H, W) in [-1, 1]
+                centres = all_centre_sequences[si][frame_idx]
+                sdir = sample_out_dir(si)
+
+                # Optional histogram matching to suppress intensity drift
+                if args.match_histograms and batch_prev_vols[b] is not None:
+                    ref_np = batch_prev_vols[b][0, 0].cpu().numpy()
+                    src_np = vol[0, 0].cpu().numpy()
+                    matched = skimage_match_histograms(
+                        src_np.astype(np.float64), ref_np.astype(np.float64)
+                    )
+                    matched = np.clip(matched, -1.0, 1.0).astype(np.float32)
+                    vol = torch.from_numpy(matched).unsqueeze(0).unsqueeze(0).to(vol.device)
+                    logger.info("  → [s%04d] histogram matched to t=%04d", si, t - 1)
+
+                # Save frame as TIFF in [0, 1]
+                vol_np = vol[0, 0].cpu().numpy()
+                vol_01 = to_zero_one(vol_np).astype(np.float32)
+                tifffile.imwrite(str(sdir / f"t{t:04d}_vol.tif"), vol_01)
+                np.save(str(sdir / f"t{t:04d}_centres.npy"), centres)
+                logger.info(
+                    "  → [s%04d] t%04d_vol.tif  n_cells=%d", si, t, len(centres)
+                )
+
+                if args.save_heatmaps:
+                    heatmap = centres_to_cond_3d(
+                        centres=centres,
+                        volume_shape=volume_shape,
+                        heatmap_sigma=args.heatmap_sigma,
+                        distance_percentile=args.distance_percentile,
+                        active_channels=active_geom,
+                        device="cpu",
+                        batch_size=1,
+                    )[0, 0].numpy()  # (D, H, W) — channel 0 is always the heatmap
+                    tifffile.imwrite(
+                        str(sdir / f"t{t:04d}_heatmap.tif"),
+                        heatmap.astype(np.float32),
+                    )
+                    batch_all_heatmaps[b].append(heatmap.astype(np.float32))
+
+                batch_all_volumes[b].append(vol_01)
+                # Keep this frame's volume as prev conditioning for next frame
+                batch_prev_vols[b] = vol
+
+        # ── Save per-sample timeseries stacks ─────────────────────────────────
+        for b, si in enumerate(batch_idxs):
+            sdir = sample_out_dir(si)
+            stack = np.stack(batch_all_volumes[b], axis=0)  # (T, D, H, W)
+            stack_path = sdir / f"timeseries_t{args.start_t:04d}-t{t_end:04d}.tif"
+            tifffile.imwrite(str(stack_path), stack)
+            logger.info(
+                "[s%04d] timeseries stack: %s  shape=%s", si, stack_path.name, stack.shape
+            )
+
+            if args.save_heatmaps and batch_all_heatmaps[b]:
+                hm_stack = np.stack(batch_all_heatmaps[b], axis=0)  # (T, D, H, W)
+                hm_path = sdir / f"timeseries_heatmap_t{args.start_t:04d}-t{t_end:04d}.tif"
+                tifffile.imwrite(str(hm_path), hm_stack)
+                logger.info("[s%04d] heatmap stack:    %s  shape=%s", si, hm_path.name, hm_stack.shape)
 
     logger.info("")
     logger.info("=" * 60)
-    logger.info("Done. %d frames written to %s", args.num_frames, out_dir)
-    logger.info("Timeseries stack: %s  shape=%s", stack_path.name, stack.shape)
+    logger.info(
+        "Done. %d sample(s) × %d frames written to %s",
+        args.num_samples, args.num_frames, out_dir,
+    )
     logger.info("=" * 60)
 
 
