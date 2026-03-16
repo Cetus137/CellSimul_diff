@@ -27,16 +27,13 @@ WORK_DIR="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff"
 
 # Directories to scan (space-separated; both train splits)
 PATCHES_DIRS=(
-    "data_live_node1_3d/train"
-    "data_live_node1_3d/val"
-    "data_live_node1_3d/test"
     "data_live_node2_3d/test"
     "data_live_node2_3d/val"
     "data_live_node2_3d/train"
 )
 
 # Where to write the output YAML block
-STATS_OUTPUT="centre_stats_3d.yaml"
+STATS_OUTPUT="centre_stats_3d_node2.yaml"
 
 # Number of histogram bins for marginal KDE grids
 N_BINS=32

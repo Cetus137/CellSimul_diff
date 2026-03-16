@@ -493,11 +493,16 @@ class Trainer:
                 self.visualizer.plot_loss_curves()
                 
                 # Visualize model output (every epoch)
-                # Get a sample batch from validation set
-                if self.val_loader is not None:
-                    sample_images, sample_conditioning = next(iter(self.val_loader))
-                else:
-                    sample_images, sample_conditioning = next(iter(self.train_loader))
+                # Get a sample batch that contains a temporal pair (prev_vol != 0)
+                # so that the V_t column is not always black.
+                sample_images, sample_conditioning = None, None
+                loader_for_viz = self.val_loader if self.val_loader is not None else self.train_loader
+                for _imgs, _cond in loader_for_viz:
+                    if _cond[:, -1].abs().max() > 0.01:
+                        sample_images, sample_conditioning = _imgs, _cond
+                        break
+                if sample_images is None:  # fallback: all single-frame dataset
+                    sample_images, sample_conditioning = next(iter(loader_for_viz))
                 
                 self.visualizer.visualize_model_output(
                     model=self.model,

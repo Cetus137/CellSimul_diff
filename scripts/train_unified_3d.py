@@ -235,6 +235,7 @@ def main():
             p_prev_drop=0.0,
             p_uncond=0.0,
             overfit_n=overfit_n,
+            active_channels=active_channels,
         )
         val_loader = get_unified_dataloader3d(
             patches_dirs=patches_dirs,
@@ -249,6 +250,7 @@ def main():
             p_prev_drop=0.0,
             p_uncond=0.0,
             overfit_n=overfit_n,
+            active_channels=active_channels,
         )
     else:
         train_loader = get_unified_dataloader3d(
@@ -263,19 +265,22 @@ def main():
             pair_sample_weight=pair_sample_weight,
             p_prev_drop=p_prev_drop,
             p_uncond=p_uncond,
+            active_channels=active_channels,
         )
         val_loader = get_unified_dataloader3d(
             patches_dirs=patches_dirs,
             pairs_dirs=pairs_dirs,
             split="val",
             batch_size=batch_size,
-            num_workers=num_workers,
+            num_workers=min(2, num_workers),   # val doesn't need fast prefetch
+            pin_memory=False,                  # avoid pinning large 3D buffers
             augment=False,
             heatmap_sigma=heatmap_sigma,
             distance_percentile=distance_percentile,
             pair_sample_weight=pair_sample_weight,
             p_prev_drop=0.0,   # always evaluate with real prev-frame conditioning
             p_uncond=0.0,
+            active_channels=active_channels,
         )
 
     logger.info("Train batches: %d   Val batches: %d",

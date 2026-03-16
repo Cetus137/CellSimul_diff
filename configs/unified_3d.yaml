@@ -21,10 +21,10 @@ random_seed: 42
 # Single-frame patches + temporal pairs are mixed with WeightedRandomSampler.
 unified_dataset:
   patches_dirs:
-    - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/"
+  #  - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/"
     - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node2_3d/"
   pairs_dirs:
-    - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/pairs/"
+  #  - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/pairs/"
     - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node2_3d/pairs/"
   # Relative weight given to each pair item vs. each single-frame item.
   # Both pools are ~equal size (~14 500 vs ~16 500 train samples), so 1.0 is
@@ -42,8 +42,8 @@ preprocessing:
   min_cells_per_patch: 5
   min_cell_volume: 500
   max_cell_volume: 500000
-  centre_heatmap_sigma: 3.0
-  distance_percentile: 95.0
+  centre_heatmap_sigma: 5.0
+  distance_percentile: 99.0
 
 # ── Augmentation ──────────────────────────────────────────────────────────────
 augmentation:
@@ -60,7 +60,7 @@ unet:
   # 2-channel conditioning: heatmap (geom) + prev_frame (appearance)
   conditioning:
     heatmap:  true    # Channel 0: Gaussian blobs at target-frame centres
-    distance: false   # Excluded — only heatmap used as geometry signal
+    distance: true   # Excluded — only heatmap used as geometry signal
   prev_frame: true    # Channel 1: V_{t-1} in [0, 1]  (zeros for frame 0)
   # → condition_channels = 1 + 1 = 2
 
@@ -100,8 +100,8 @@ scheduler:
 
 # ── DataLoader ────────────────────────────────────────────────────────────────
 dataloader:
-  batch_size:  4
-  num_workers: 8
+  batch_size:  1
+  num_workers: 4
 
 # ── Training ──────────────────────────────────────────────────────────────────
 training:
@@ -114,8 +114,8 @@ training:
   save_every:     5000
   validate_every: 5000
 
-  checkpoint_dir: "checkpoints/unified_3d_2"
-  viz_dir:        "visualizations/unified_3d_2"
+  checkpoint_dir: "checkpoints/unified_3d_node2_D_C"
+  viz_dir:        "visualizations/unified_3d_node2_D_C"
   keep_last_n_checkpoints: 5
 
   ema:

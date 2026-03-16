@@ -46,8 +46,9 @@ from datasets.temporal_pair_dataset3d import TemporalPairDataset3D
 
 logger = logging.getLogger(__name__)
 
-# Only heatmap — distance is disabled for the unified model.
-_UNIFIED_ACTIVE_CHANNELS = {"heatmap": True, "distance": False}
+# Default conditioning channels for the unified model (heatmap only).
+# Override by passing active_channels to UnifiedFrame3DDataset / get_unified_dataloader3d.
+_UNIFIED_ACTIVE_CHANNELS_DEFAULT = {"heatmap": True, "distance": False}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -90,11 +91,13 @@ class UnifiedFrame3DDataset(Dataset):
         heatmap_sigma: float = 3.0,
         distance_percentile: float = 95.0,
         overfit_n: int = 0,
+        active_channels: Optional[dict] = None,
     ):
         self.split = split
         self.pair_sample_weight = pair_sample_weight
         self.p_prev_drop = p_prev_drop
         self.augment = augment and (split == "train")
+        _active = active_channels if active_channels is not None else _UNIFIED_ACTIVE_CHANNELS_DEFAULT
 
         # ── Single-frame sub-datasets ──────────────────────────────────────────
         sf_parts = [
@@ -104,7 +107,7 @@ class UnifiedFrame3DDataset(Dataset):
                 heatmap_sigma=heatmap_sigma,
                 normalize_images=True,
                 augment=self.augment,
-                active_channels=_UNIFIED_ACTIVE_CHANNELS,
+                active_channels=_active,
             )
             for d in patches_dirs
         ]
@@ -126,7 +129,7 @@ class UnifiedFrame3DDataset(Dataset):
                 heatmap_sigma=heatmap_sigma,
                 distance_percentile=distance_percentile,
                 overfit_n=overfit_n,
-                active_channels=_UNIFIED_ACTIVE_CHANNELS,
+                active_channels=_active,
             )
             for d in pairs_dirs
         ]
@@ -160,30 +163,32 @@ class UnifiedFrame3DDataset(Dataset):
 
     def _get_single_frame(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Returns (image, 2-ch conditioning) for a single-frame patch.
-        Conditioning channel 1 is all-zeros (no previous frame).
+        Returns (image, conditioning) for a single-frame patch.
+        The sub-dataset returns n_geom geometry channels; we append exactly
+        1 zero channel for the (absent) previous frame, regardless of n_geom.
         """
-        image, cond_1ch = self._sf_dataset[idx]  # cond_1ch: (1, D, H, W)
+        image, cond_geom = self._sf_dataset[idx]  # cond_geom: (n_geom, D, H, W)
 
-        # Append zero prev-frame channel
-        zeros = torch.zeros_like(cond_1ch)       # (1, D, H, W)
-        conditioning = torch.cat([cond_1ch, zeros], dim=0)  # (2, D, H, W)
+        # Always append exactly 1 zero prev-frame channel (not zeros_like which
+        # would mirror the full n_geom channels when n_geom > 1).
+        zero_prev = torch.zeros(1, *cond_geom.shape[1:], dtype=cond_geom.dtype)
+        conditioning = torch.cat([cond_geom, zero_prev], dim=0)  # (n_geom+1, D, H, W)
 
         return image, conditioning
 
     def _get_pair(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Returns (image, 2-ch conditioning) for a temporal pair.
-        TemporalPairDataset3D with active_channels={'heatmap':True,'distance':False}
-        already returns (image, (2, D, H, W)) where ch0=heatmap, ch1=V_{t-1}.
-        We optionally zero ch1 with probability p_prev_drop.
+        Returns (image, conditioning) for a temporal pair.
+        TemporalPairDataset3D returns (image, (n_geom+1, D, H, W)) where the
+        last channel is V_{t-1}.  We optionally zero that last channel with
+        probability p_prev_drop to teach the model the frame-0 case.
         """
-        image, conditioning = self._pair_dataset[idx]  # conditioning: (2, D, H, W)
+        image, conditioning = self._pair_dataset[idx]  # conditioning: (n_geom+1, D, H, W)
 
-        # Independent prev-frame dropout (teaches frame-0 generation)
+        # Independent prev-frame dropout — prev-frame is always the LAST channel.
         if self.p_prev_drop > 0.0 and np.random.rand() < self.p_prev_drop:
             conditioning = conditioning.clone()
-            conditioning[1] = 0.0
+            conditioning[-1] = 0.0
 
         return image, conditioning
 
@@ -217,6 +222,7 @@ def get_unified_dataloader3d(
     p_uncond: float = 0.0,
     overfit_n: int = 0,
     pin_memory: bool = True,
+    active_channels: Optional[dict] = None,
 ) -> DataLoader:
     """
     Create a DataLoader for the unified 3D autoregressive diffusion model.
@@ -261,6 +267,7 @@ def get_unified_dataloader3d(
         heatmap_sigma=heatmap_sigma,
         distance_percentile=distance_percentile,
         overfit_n=overfit_n,
+        active_channels=active_channels,
     )
 
     # CFG dropout: zero full conditioning tensor with probability p_uncond.
@@ -286,10 +293,19 @@ def get_unified_dataloader3d(
             drop_last=True,
         )
     else:
+        # Use the same WeightedRandomSampler as train so that val loss is
+        # computed on the same single-frame / pair mix, making the metric
+        # directly comparable to (and not artificially lower than) train loss.
+        weights = inner_dataset.get_sample_weights()
+        val_sampler = WeightedRandomSampler(
+            weights=weights,
+            num_samples=len(weights),
+            replacement=True,
+        )
         return DataLoader(
             dataset,
             batch_size=batch_size,
-            shuffle=False,
+            sampler=val_sampler,
             num_workers=num_workers,
             pin_memory=pin_memory,
             drop_last=False,

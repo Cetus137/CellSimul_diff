@@ -68,7 +68,7 @@ HEATMAP_SIGMA=3.0
 METHOD="realistic"
 
 # Inter-frame Gaussian displacement std-dev (voxels) — only used when METHOD=realistic
-DISPLACEMENT_SIGMA=10
+DISPLACEMENT_SIGMA=5
 
 # Random seed for centre generation (leave empty for a random seed each run)
 SEED=""
@@ -83,17 +83,24 @@ MATCH_HISTOGRAMS=true
 # Fraction of denoising steps (from t=0, low-noise end) during which the
 # prev-frame channel is active. 0.3 = heatmap drives placement for 70% of steps,
 # prev_vol contributes texture for the final 30%. 1.0 = always active (no change).
-PREV_VOL_ACTIVE_FRAC=0.3
+PREV_VOL_ACTIVE_FRAC=0.7
 
 # Number of independent timeseries to generate.
 # With METHOD=realistic each sample gets its own centre sequence.
 # With METHOD=from_files all samples share the same centres; diversity comes from diffusion noise.
-NUM_SAMPLES=4
+NUM_SAMPLES=1
 
 # How many samples to process simultaneously as a GPU batch.
 # Higher = faster but uses proportionally more GPU memory.
 # Rule of thumb: 4 samples × 128^3 at float32 ≈ 2 GB extra VRAM.
-SAMPLE_BATCH_SIZE=4
+SAMPLE_BATCH_SIZE=1
+
+# Voxel padding around the visible volume used for simulation (METHOD=realistic only).
+# Centres are simulated in (VOLUME_SIZE + 2*PADDING)³; only those inside the central
+# VOLUME_SIZE³ region contribute to the heatmap.  Cells that drift outside appear as
+# NaN rows in saved centre files, preserving row-index = instance-ID across frames.
+# Set to 0 to disable (cells clamp at border, old behaviour).
+SIMULATION_PADDING=16
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -119,6 +126,7 @@ echo "displacement_sigma: $DISPLACEMENT_SIGMA"
 echo "Method:     $METHOD  (centres_dir=$CENTRES_DIR  sigma=$DISPLACEMENT_SIGMA)"
 echo "Frames:     $NUM_FRAMES  (t=$START_T … t=$(( START_T + NUM_FRAMES - 1 )))"
 echo "Samples:    $NUM_SAMPLES  (batch_size=$SAMPLE_BATCH_SIZE)"
+echo "Sim padding: $SIMULATION_PADDING vox"
 echo "Output:     $OUT_DIR"
 echo "========================================================"
 
@@ -140,7 +148,8 @@ CMD="python scripts/generate_timeseries_unified_3d.py \
     --guidance_scale_t0 $GUIDANCE_SCALE_T0 \
     --prev_vol_active_frac $PREV_VOL_ACTIVE_FRAC \
     --num_samples $NUM_SAMPLES \
-    --sample_batch_size $SAMPLE_BATCH_SIZE"
+    --sample_batch_size $SAMPLE_BATCH_SIZE \
+    --simulation_padding $SIMULATION_PADDING"
 
 if [ "$USE_CFG" = "true" ]; then
     CMD="$CMD --cfg"

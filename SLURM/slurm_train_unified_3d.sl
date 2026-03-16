@@ -4,7 +4,8 @@
 #SBATCH --partition=gpu_long
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem-per-gpu=20G
+##SBATCH --mem=70G
+#SBATCH --mem-per-gpu=80G
 #SBATCH --time          23:59:00
 #SBATCH --output        slogs/train_unified_3d.%j.out
 #SBATCH --error         slogs/train_unified_3d.%j.err
@@ -55,7 +56,7 @@ CONFIG="configs/unified_3d.yaml"
 
 # Set to a checkpoint path to resume, or leave empty to start fresh
 # Example: RESUME="checkpoints/unified_3d/latest.pt"
-RESUME="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/checkpoints/unified_3d/checkpoint_step_45000.pt"
+RESUME= "" #"/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/checkpoints/unified_3d_node2_D_C/best.pt"
 
 cd $WORK_DIR
 

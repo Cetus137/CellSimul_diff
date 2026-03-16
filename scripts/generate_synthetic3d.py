@@ -496,12 +496,16 @@ Examples:
                 ddim_steps=ddim_steps_eff,
             )
 
+            # Build ordered channel names from active_channels so filenames match content
+            _ch_order = ['heatmap', 'distance']
+            _active_ch_names = [k for k in _ch_order if (active_channels or {}).get(k, True)]
+
             # Save each volume in the batch
             for j, (bi, volume, metadata) in enumerate(
                 zip(batch_indices, volumes, metadatas)
             ):
                 centres = batch_centres[j]
-                heatmap = metadata['condition_maps'][0]  # (D, H, W)
+                cond_maps = metadata['condition_maps']  # (n_geom, D, H, W)
 
                 volume_file  = output_dir / f"{args.prefix}_{bi:04d}.tif"
                 centres_file = output_dir / f"{args.prefix}_{bi:04d}_centres.npy"
@@ -510,12 +514,16 @@ Examples:
                 np.save(str(centres_file), centres)
 
                 if not args.no_heatmap:
-                    heatmap_file = output_dir / f"{args.prefix}_{bi:04d}_heatmap.tif"
-                    tifffile.imwrite(str(heatmap_file), heatmap.astype(np.float32))
+                    # Save every active conditioning channel with its proper name
+                    for ch_idx, ch_name in enumerate(_active_ch_names):
+                        if ch_idx < cond_maps.shape[0]:
+                            ch_file = output_dir / f"{args.prefix}_{bi:04d}_cond_{ch_name}.tif"
+                            tifffile.imwrite(str(ch_file), cond_maps[ch_idx].astype(np.float32))
 
                 if not args.no_visualization:
                     viz_file = output_dir / f"{args.prefix}_{bi:04d}_viz.png"
-                    save_3d_visualization(volume, centres, viz_file, heatmap=heatmap)
+                    # Pass first channel to visualization (used for slice overlay row)
+                    save_3d_visualization(volume, centres, viz_file, heatmap=cond_maps[0])
 
                 all_cell_counts.append(len(centres))
                 logger.info(

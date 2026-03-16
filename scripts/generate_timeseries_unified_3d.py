@@ -49,6 +49,7 @@ Output per frame:
 """
 
 import argparse
+import csv
 import logging
 import sys
 from pathlib import Path
@@ -145,6 +146,44 @@ def displace_centres(
         displaced[:, 2] = np.clip(displaced[:, 2], border_margin, w - border_margin)
 
     return displaced
+
+
+def filter_centres_to_window(
+    sim_centres: np.ndarray,
+    padding: int,
+    volume_size: int,
+) -> tuple:
+    """
+    Split simulation-space centres into those inside the visible model window
+    and a full (N, 3) array with NaN for absent cells.
+
+    The model window is the inner ``volume_size³`` region of the simulation
+    volume: coords in ``[padding, padding + volume_size)`` on every axis.
+
+    Args:
+        sim_centres: ``(N, 3)`` float32 centres in simulation space,
+                     e.g. ``[0, sim_size)`` with ``sim_size = volume_size + 2*padding``.
+        padding:     Number of voxels of border padding on each side.
+        volume_size: Side length of the visible model volume (e.g. 128).
+
+    Returns:
+        inner_centres: ``(M, 3)`` float32 coords in model space ``[0, volume_size)``
+                       for cells currently inside the window.  May be empty.
+        saved_centres: ``(N, 3)`` float32 in model space.  Cells outside the
+                       window have ``NaN`` coords.  Row index = persistent
+                       instance ID is always preserved.
+    """
+    lo = float(padding)
+    hi = float(padding + volume_size)
+    in_window = (
+        (sim_centres[:, 0] >= lo) & (sim_centres[:, 0] < hi) &
+        (sim_centres[:, 1] >= lo) & (sim_centres[:, 1] < hi) &
+        (sim_centres[:, 2] >= lo) & (sim_centres[:, 2] < hi)
+    )
+    model_coords = sim_centres - float(padding)          # shift to model space
+    saved = np.where(in_window[:, np.newaxis], model_coords, np.nan).astype(np.float32)
+    inner = model_coords[in_window].astype(np.float32)
+    return inner, saved
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -407,6 +446,15 @@ def main():
              "Must divide --num_samples cleanly or the last batch will be smaller. "
              "(default: 1)"
     )
+    parser.add_argument(
+        "--simulation_padding", type=int, default=16,
+        help="(--method realistic only) Voxel padding added on every side of the "
+             "visible volume for simulation purposes. E.g. 16 → centres are simulated "
+             "in a (volume_size + 2*16)³ space; only those inside the inner volume_size³ "
+             "window are passed to the heatmap. Cells that drift outside that window "
+             "appear as NaN rows in saved centre files, preserving row-index = instance-ID "
+             "across frames.  0 disables the feature (backward-compatible). (default: 16)"
+    )
     args = parser.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -436,8 +484,18 @@ def main():
     )
     model.eval()
 
-    # ── Build centres sequence ─────────────────────────────────────────────────
+    # ── Volume & simulation dimensions ────────────────────────────────────────
     volume_shape = (args.volume_size, args.volume_size, args.volume_size)
+    sim_padding  = args.simulation_padding
+    sim_size     = args.volume_size + 2 * sim_padding
+    sim_shape    = (sim_size, sim_size, sim_size)
+    # Sequences are stored in simulation space only for realistic + padding > 0.
+    centres_are_in_sim_space = (args.method == "realistic" and sim_padding > 0)
+    if centres_are_in_sim_space:
+        logger.info(
+            "Simulation space: %d³  (visible %d³ + %d px padding each side)",
+            sim_size, args.volume_size, sim_padding,
+        )
 
     # ── Build ALL centre sequences (one per sample) ───────────────────────────
     all_centre_sequences: List[List[np.ndarray]] = []
@@ -465,13 +523,20 @@ def main():
         _disp_min_dist = float(cg.get("min_distance", 0.0))
         _disp_max_iter = int(cg.get("max_attempts", 50))
 
+        # When simulation_padding > 0 generate in the larger sim_shape so
+        # cells can drift in/out of the visible volume_shape window.  Scale
+        # cell counts proportionally so density inside the window is preserved.
+        _gen_shape  = sim_shape if centres_are_in_sim_space else volume_shape
+        _vol_ratio  = float(sim_size ** 3) / float(args.volume_size ** 3) \
+                      if centres_are_in_sim_space else 1.0
+
         for s in range(args.num_samples):
             c0 = generate_realistic_centres3d(
-                volume_shape=volume_shape,
-                n_mean=float(cg["n_mean"]),
-                n_std=float(cg["n_std"]),
-                n_min=int(cg["n_min"]),
-                n_max=int(cg["n_max"]),
+                volume_shape=_gen_shape,
+                n_mean=float(cg["n_mean"]) * _vol_ratio,
+                n_std=float(cg["n_std"])   * _vol_ratio,
+                n_min=max(1, int(cg["n_min"] * _vol_ratio)),
+                n_max=int(cg["n_max"] * _vol_ratio),
                 min_distance=float(cg["min_distance"]),
                 density_grid_z=cg["density_grid_z"],
                 density_grid_y=cg["density_grid_y"],
@@ -488,7 +553,7 @@ def main():
                     displace_centres(
                         seq[-1],
                         sigma=args.displacement_sigma,
-                        volume_shape=volume_shape,
+                        volume_shape=_gen_shape,
                         border_margin=border_margin,
                         rng=rng,
                         min_distance=_disp_min_dist,
@@ -496,10 +561,18 @@ def main():
                     )
                 )
             all_centre_sequences.append(seq)
-            logger.info(
-                "Sample %04d centre sequence: %d cells  displacement_sigma=%.1f vox",
-                s, len(c0), args.displacement_sigma,
-            )
+            if centres_are_in_sim_space:
+                _, c0_saved = filter_centres_to_window(c0, sim_padding, args.volume_size)
+                n_visible = int(np.sum(~np.isnan(c0_saved[:, 0])))
+                logger.info(
+                    "Sample %04d: %d cells total in sim  (%d visible at t=0)  sigma=%.1f vox",
+                    s, len(c0), n_visible, args.displacement_sigma,
+                )
+            else:
+                logger.info(
+                    "Sample %04d centre sequence: %d cells  displacement_sigma=%.1f vox",
+                    s, len(c0), args.displacement_sigma,
+                )
 
     # ── Helper: per-sample output directory ───────────────────────────────────
     def sample_out_dir(s: int) -> Path:
@@ -533,6 +606,8 @@ def main():
         batch_prev_vols: List[Optional[torch.Tensor]] = [None] * B
         batch_all_volumes: List[List[np.ndarray]] = [[] for _ in range(B)]
         batch_all_heatmaps: List[List[np.ndarray]] = [[] for _ in range(B)]
+        # List of (timepoint, saved_centres (N,3)) tuples for the tracks CSV
+        batch_all_centres: List[List[tuple]] = [[] for _ in range(B)]
 
         for frame_idx in range(args.num_frames):
             t = args.start_t + frame_idx
@@ -546,10 +621,22 @@ def main():
             if is_frame0 and args.guidance_scale_t0 is not None:
                 logger.info("  Frame 0 CFG scale: %.2f", frame_guidance)
 
+            # Filter sim-space centres to visible window (or pass through)
+            frame_inner: List[np.ndarray] = []
+            frame_saved: List[np.ndarray] = []
+            for b, si in enumerate(batch_idxs):
+                raw = all_centre_sequences[si][frame_idx]
+                if centres_are_in_sim_space:
+                    inner, saved = filter_centres_to_window(raw, sim_padding, args.volume_size)
+                else:
+                    inner, saved = raw, raw
+                frame_inner.append(inner)
+                frame_saved.append(saved)
+
             # Build stacked conditioning  (B, C, D, H, W)
             cond_list = [
                 build_frame_conditioning(
-                    centres=all_centre_sequences[si][frame_idx],
+                    centres=frame_inner[b],          # model-space, visible cells only
                     volume_shape=volume_shape,
                     prev_vol=batch_prev_vols[b],
                     active_geom=active_geom,
@@ -557,7 +644,7 @@ def main():
                     distance_percentile=args.distance_percentile,
                     device=device,
                 )
-                for b, si in enumerate(batch_idxs)
+                for b in range(B)
             ]
             cond_batch = torch.cat(cond_list, dim=0)  # (B, C, D, H, W)
 
@@ -573,7 +660,6 @@ def main():
             # ── Per-sample post-processing, histogram matching, save ──────────
             for b, si in enumerate(batch_idxs):
                 vol = vols[b:b+1]  # (1, 1, D, H, W) in [-1, 1]
-                centres = all_centre_sequences[si][frame_idx]
                 sdir = sample_out_dir(si)
 
                 # Optional histogram matching to suppress intensity drift
@@ -587,18 +673,30 @@ def main():
                     vol = torch.from_numpy(matched).unsqueeze(0).unsqueeze(0).to(vol.device)
                     logger.info("  → [s%04d] histogram matched to t=%04d", si, t - 1)
 
+                # frame_saved: (N_total, 3), NaN for cells outside visible window.
+                # frame_inner: (M, 3), model-space coords of visible cells only.
+                saved_centres = frame_saved[b]
+                inner_centres = frame_inner[b]
+                n_active = int(np.sum(~np.isnan(saved_centres[:, 0]))) \
+                           if saved_centres.dtype == np.float32 and np.any(np.isnan(saved_centres)) \
+                           else len(saved_centres)
+
                 # Save frame as TIFF in [0, 1]
                 vol_np = vol[0, 0].cpu().numpy()
                 vol_01 = to_zero_one(vol_np).astype(np.float32)
                 tifffile.imwrite(str(sdir / f"t{t:04d}_vol.tif"), vol_01)
-                np.save(str(sdir / f"t{t:04d}_centres.npy"), centres)
+                # Centres file: (N_total, 3) with NaN for absent cells.
+                # Row index = persistent instance ID across all frames.
+                np.save(str(sdir / f"t{t:04d}_centres.npy"), saved_centres)
                 logger.info(
-                    "  → [s%04d] t%04d_vol.tif  n_cells=%d", si, t, len(centres)
+                    "  → [s%04d] t%04d_vol.tif  n_active=%d/%d",
+                    si, t, n_active, len(saved_centres)
                 )
 
                 if args.save_heatmaps:
+                    # Use inner_centres (model-space, visible only) for the heatmap
                     heatmap = centres_to_cond_3d(
-                        centres=centres,
+                        centres=inner_centres,
                         volume_shape=volume_shape,
                         heatmap_sigma=args.heatmap_sigma,
                         distance_percentile=args.distance_percentile,
@@ -613,6 +711,7 @@ def main():
                     batch_all_heatmaps[b].append(heatmap.astype(np.float32))
 
                 batch_all_volumes[b].append(vol_01)
+                batch_all_centres[b].append((t, saved_centres))
                 # Keep this frame's volume as prev conditioning for next frame
                 batch_prev_vols[b] = vol
 
@@ -631,6 +730,24 @@ def main():
                 hm_path = sdir / f"timeseries_heatmap_t{args.start_t:04d}-t{t_end:04d}.tif"
                 tifffile.imwrite(str(hm_path), hm_stack)
                 logger.info("[s%04d] heatmap stack:    %s  shape=%s", si, hm_path.name, hm_stack.shape)
+
+            # ── Tracks CSV: timepoint, track_id, x, y, z ──────────────────────
+            # Centres are stored internally as (z, y, x); CSV exports as x, y, z.
+            # NaN rows = cell absent from visible volume at that timepoint.
+            csv_path = sdir / f"timeseries_t{args.start_t:04d}-t{t_end:04d}_tracks.csv"
+            with open(csv_path, "w", newline="") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(["timepoint", "track_id", "x", "y", "z"])
+                for tp, centres_arr in batch_all_centres[b]:
+                    for track_id, (cz, cy, cx) in enumerate(centres_arr):
+                        writer.writerow([
+                            tp,
+                            track_id,
+                            "" if np.isnan(cx) else f"{cx:.4f}",
+                            "" if np.isnan(cy) else f"{cy:.4f}",
+                            "" if np.isnan(cz) else f"{cz:.4f}",
+                        ])
+            logger.info("[s%04d] tracks CSV:       %s", si, csv_path.name)
 
     logger.info("")
     logger.info("=" * 60)
