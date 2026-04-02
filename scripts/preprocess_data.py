@@ -9,10 +9,6 @@ import yaml
 from pathlib import Path
 import logging
 
-# Add parent directory to path
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
-
 from preprocessing.build_dataset import build_dataset
 
 logging.basicConfig(

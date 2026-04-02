@@ -2,7 +2,7 @@
 #SBATCH --job-name=generate_cells_3d
 #SBATCH --output=slogs/generate_3d_%j.out
 #SBATCH --error=slogs/generate_3d_%j.err
-#SBATCH --time=01:30:00
+#SBATCH --time=03:30:00
 #SBATCH --partition=gpu_short
 #SBATCH --gpus-per-node=1
 #SBATCH --constraint="a100|rtx8000|v100"
@@ -25,13 +25,13 @@ module load CUDA/12.0
 source ~/devel/venv/Python-3.10.8-GCCcore-12.2.0/cell_simul_env/bin/activate
 
 # Configuration
-CHECKPOINT="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/checkpoints/unified_3d_node2_D_C/best.pt"
+CHECKPOINT="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/checkpoints/unified_3d_node1_C_no_cfg_SNR/checkpoint_step_205000.pt"
 NUM_SAMPLES=100
-OUTPUT_DIR="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/synthetic_cells_3d/node2_only_D_C"
+OUTPUT_DIR="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/synthetic_cells_3d/node1_only_C_no_cfg"
 METHOD="realistic"  # Options: simple, poisson, training_dist, from_file, realistic
 CENTRES_FILE="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/test/patch3d_f0005_00000_centres.npy"   # Only needed if METHOD=from_file
 
-GUIDANCE_SCALE=2.0
+GUIDANCE_SCALE=0.0
 DDIM_STEPS=0             # DDIM steps per volume; set to 0 to use full DDPM-1000
 BATCH_SIZE=1             # Volumes per GPU pass — ~2x throughput; use 1 if VRAM OOM
 CONFIG="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/configs/unified_3d.yaml"
@@ -71,7 +71,8 @@ if [ "$METHOD" == "from_file" ] && [ -n "$CENTRES_FILE" ]; then
 fi
 
 # Disable CFG (remove --no_cfg to enable)
-#CMD="$CMD --no_cfg"
+
+CMD="$CMD --no_cfg"
 
 # Batch multiple volumes into a single DDPM pass for ~BATCH_SIZE x throughput
 CMD="$CMD --batch_size \"$BATCH_SIZE\""

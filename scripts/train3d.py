@@ -17,9 +17,6 @@ from pathlib import Path
 import logging
 import numpy as np
 
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
-
 from models.unet3d import ConditionalUNet3D
 from models.diffusion3d import DDPM3D
 from datasets.centre_condition_dataset3d import get_dataloader3d

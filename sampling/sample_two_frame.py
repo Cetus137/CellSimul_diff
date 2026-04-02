@@ -28,14 +28,11 @@ python -m sampling.sample_two_frame ... --cfg --guidance_scale 3.0
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 import yaml
-
-sys.path.append(str(Path(__file__).parent.parent))
 
 from models.diffusion import DDPM
 from models.unet import ConditionalUNet

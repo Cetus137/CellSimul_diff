@@ -31,7 +31,6 @@ compare_morphology_3d    — Wasserstein distances + plots across two sets
 """
 
 import logging
-import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -42,8 +41,6 @@ from scipy.spatial import cKDTree
 from scipy.stats import wasserstein_distance
 from skimage.measure import regionprops, label as sk_label
 from skimage.segmentation import find_boundaries
-
-sys.path.append(str(Path(__file__).parent.parent))
 
 logger = logging.getLogger(__name__)
 

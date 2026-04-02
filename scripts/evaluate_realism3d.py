@@ -45,8 +45,6 @@ import numpy as np
 import tifffile
 import torch
 
-sys.path.append(str(Path(__file__).parent.parent))
-
 from utils.normalization import normalize_raw_image
 from evaluation.metrics3d import compare_all_metrics
 from evaluation.embedding3d import (
@@ -251,11 +249,12 @@ def main():
             device=device,
         )
 
-        # Reconstruct active_channels from the config so conditioning matches training
+        # Reconstruct active_channels and prev_frame flag from config
         with open(args.config) as _f:
             config = yaml.safe_load(_f)
         _cond_cfg = config.get('unet', {}).get('conditioning', {})
         _active_channels = {k: bool(v) for k, v in _cond_cfg.items()} if _cond_cfg else None
+        _prev_frame = bool(config.get('unet', {}).get('prev_frame', False))
 
         logger.info("Extracting embeddings — real set (%d volumes) ...", len(real_tuples))
         Z_real = extract_embeddings(
@@ -265,6 +264,7 @@ def main():
             batch_size=args.batch_size,
             heatmap_sigma=args.heatmap_sigma,
             active_channels=_active_channels,
+            prev_frame=_prev_frame,
         )
 
         logger.info("Extracting embeddings — synthetic set (%d volumes) ...", len(syn_tuples))
@@ -275,6 +275,7 @@ def main():
             batch_size=args.batch_size,
             heatmap_sigma=args.heatmap_sigma,
             active_channels=_active_channels,
+            prev_frame=_prev_frame,
         )
 
         logger.info("Computing Fréchet Distance ...")

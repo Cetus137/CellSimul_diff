@@ -13,9 +13,6 @@ import yaml
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict
 import logging
-import sys
-
-sys.path.append(str(Path(__file__).parent.parent))
 
 from sampling.generate_centres import (
     generate_random_centres_poisson,

@@ -56,7 +56,7 @@ CONFIG="configs/unified_3d.yaml"
 
 # Set to a checkpoint path to resume, or leave empty to start fresh
 # Example: RESUME="checkpoints/unified_3d/latest.pt"
-RESUME= "" #"/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/checkpoints/unified_3d_node2_D_C/best.pt"
+RESUME="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/checkpoints/unified_3d_node2_C_no_cfg/checkpoint_step_147500.pt"
 
 cd $WORK_DIR
 

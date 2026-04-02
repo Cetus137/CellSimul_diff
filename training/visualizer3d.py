@@ -109,9 +109,25 @@ class TrainingVisualizer3D:
         """
         self.val_losses.append((step, val_loss))
 
+    def get_history(self) -> dict:
+        """Return loss history as a plain dict for checkpoint persistence."""
+        return {
+            'epochs':       list(self.epochs),
+            'train_losses': list(self.train_losses),
+            'train_steps':  list(self.train_steps),
+            'val_losses':   list(self.val_losses),
+        }
+
+    def set_history(self, history: dict):
+        """Restore loss history from a checkpoint (enables cross-run plots)."""
+        self.epochs       = history.get('epochs',       [])
+        self.train_losses = history.get('train_losses', [])
+        self.train_steps  = history.get('train_steps',  [])
+        self.val_losses   = history.get('val_losses',   [])
+
     def plot_loss_curves(self, save_name: str = "loss_curves.png"):
         """Plot and save train/val loss curves (x-axis = global step)."""
-        if len(self.epochs) == 0:
+        if len(self.epochs) == 0 and len(self.val_losses) == 0:
             return
 
         fig, ax = plt.subplots(figsize=(8, 5))
@@ -131,9 +147,10 @@ class TrainingVisualizer3D:
         all_losses = list(self.train_losses)
         if self.val_losses:
             all_losses += [l for _, l in self.val_losses]
-        lo, hi = min(all_losses), max(all_losses)
-        if lo > 0 and hi / lo > 10:
-            ax.set_yscale("log")
+        if all_losses:
+            lo, hi = min(all_losses), max(all_losses)
+            if lo > 0 and hi / lo > 10:
+                ax.set_yscale("log")
 
         ax.set_xlabel("Step")
         ax.set_ylabel("Loss")

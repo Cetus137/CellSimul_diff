@@ -35,9 +35,6 @@ import numpy as np
 import torch
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, WeightedRandomSampler
 
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
-
 from datasets.centre_condition_dataset3d import (
     CentreConditionDataset3D,
     ConditionalDropoutDataset3D,

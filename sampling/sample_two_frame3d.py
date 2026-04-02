@@ -36,7 +36,6 @@ python -m sampling.sample_two_frame3d ... --cfg --guidance_scale 3.0
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -44,8 +43,6 @@ import torch
 import yaml
 import tifffile
 from skimage.exposure import match_histograms
-
-sys.path.append(str(Path(__file__).parent.parent))
 
 from models.diffusion3d import DDPM3D
 from models.unet3d import ConditionalUNet3D
@@ -214,13 +211,13 @@ def load_model(checkpoint_path: str, config_path: str, device: str,
             if name in shadow:
                 state[name] = shadow[name]
         try:
-            model.load_state_dict(state)
+            model.load_state_dict(state, strict=False)
         except Exception as exc:
             _rethrow_with_context(exc)
         logger.info("Loaded EMA weights from %s", checkpoint_path)
     elif "model_state_dict" in ckpt:
         try:
-            model.load_state_dict(ckpt["model_state_dict"])
+            model.load_state_dict(ckpt["model_state_dict"], strict=False)
         except Exception as exc:
             _rethrow_with_context(exc)
         logger.info(
@@ -231,7 +228,7 @@ def load_model(checkpoint_path: str, config_path: str, device: str,
     else:
         # Assume bare state-dict
         try:
-            model.load_state_dict(ckpt)
+            model.load_state_dict(ckpt, strict=False)
         except Exception as exc:
             _rethrow_with_context(exc)
         logger.info("Loaded bare state-dict from %s", checkpoint_path)

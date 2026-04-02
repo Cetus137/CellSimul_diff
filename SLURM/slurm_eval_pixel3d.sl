@@ -28,13 +28,13 @@ cd $WORK_DIR
 # ── Configuration ──────────────────────────────────────────────────────────────
 REAL_DIR1="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/test"
 
-SYN_DIR="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_synthetic_3D_frame1_volumes/no_z_raw"
+SYN_DIR="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_synthetic_3D_frame1_volumes/node2_d_c"
 
 # Dummy ckpt/config values — not used when --no_encoder is set, but required by argparse
 CKPT="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/checkpoints/frame1_3d_combined_noD_noZ_raw/best.pt"
 CONFIG="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/configs/frame1_3d.yaml"
 
-EVAL_OUT_DIR="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/evaluation/results_noZ_raw/pixel"
+EVAL_OUT_DIR="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/evaluation/results_node2_D_C/from_test/pixel"
 
 MAX_REAL=""   # e.g. MAX_REAL=200
 MAX_SYN=""    # e.g. MAX_SYN=50

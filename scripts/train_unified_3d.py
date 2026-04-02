@@ -23,15 +23,12 @@ Usage:
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.optim as optim
 import yaml
-
-sys.path.append(str(Path(__file__).parent.parent))
 
 from datasets.unified_dataset3d import get_unified_dataloader3d
 from models.diffusion3d import DDPM3D
@@ -106,6 +103,7 @@ def create_model(cfg):
         beta_end=d.get("beta_end", 0.02),
         prediction_type=d["prediction_type"],
         loss_type=d["loss_type"],
+        min_snr_gamma=d.get("min_snr_gamma", None),
     )
     return ddpm
 
@@ -272,7 +270,7 @@ def main():
             pairs_dirs=pairs_dirs,
             split="val",
             batch_size=batch_size,
-            num_workers=min(2, num_workers),   # val doesn't need fast prefetch
+            num_workers=num_workers,
             pin_memory=False,                  # avoid pinning large 3D buffers
             augment=False,
             heatmap_sigma=heatmap_sigma,
@@ -317,6 +315,7 @@ def main():
         log_every=tr.get("log_every", 100),
         save_every=tr.get("save_every", 5000),
         validate_every=tr.get("validate_every", 2000),
+        max_val_batches=tr.get("max_val_batches", None),
         visualize=tr.get("visualize", True),
         viz_dir=tr.get("viz_dir", "visualizations/unified_3d"),
         low_noise_bias=sm.get("low_noise_bias", False) and not args.debug_overfit,

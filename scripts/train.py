@@ -10,10 +10,6 @@ from pathlib import Path
 import logging
 import numpy as np
 
-# Add parent directory to path
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
-
 from models.unet import ConditionalUNet
 from models.diffusion import DDPM
 from datasets.centre_condition_dataset import get_dataloader

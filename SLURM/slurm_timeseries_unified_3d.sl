@@ -4,7 +4,7 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem-per-gpu=2G
-#SBATCH --time          00:30:00
+#SBATCH --time          01:00:00
 #SBATCH --output        slogs/timeseries_unified_3d.%j.out
 #SBATCH --error         slogs/timeseries_unified_3d.%j.err
 #SBATCH --exclude       compg009,compg010,compg011,compg013
@@ -38,7 +38,7 @@ cd $WORK_DIR
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-CHECKPOINT="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/checkpoints/unified_3d/best.pt"
+CHECKPOINT="/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/checkpoints/unified_3d_node1_C_no_cfg_SNR/checkpoint_step_205000.pt"
 CONFIG="configs/unified_3d.yaml"
 
 # Directory containing synthetic_3d_NNNN_centres.npy files
@@ -46,29 +46,29 @@ CENTRES_DIR="synthetic_cells_3d"
 
 # First timepoint index and total number of frames to generate
 START_T=0
-NUM_FRAMES=3
+NUM_FRAMES=4
 
 VOLUME_SIZE=128
 
 # Output directory — a subdirectory per run is recommended
-OUT_DIR="timeseries_output/unified_3d"
+OUT_DIR="timeseries_output/unified_3d_C_no_cfg"
 
 # Classifier-free guidance  (true / false)
-USE_CFG=true
-GUIDANCE_SCALE=2.0          # frames 1+
-GUIDANCE_SCALE_T0=2.0       # frame 0 only (heatmap-only conditioning → can be higher)
+USE_CFG=false
+GUIDANCE_SCALE=1.0          # frames 1+
+GUIDANCE_SCALE_T0=0.0       # frame 0 only (heatmap-only conditioning → can be higher)
 
 # Load EMA weights from checkpoint (recommended for best quality)
 USE_EMA=false
 
 # Heatmap sigma (voxels) — should match the value used during training
-HEATMAP_SIGMA=3.0
+HEATMAP_SIGMA=5.0
 
 # Centre generation method: from_files | realistic
 METHOD="realistic"
 
 # Inter-frame Gaussian displacement std-dev (voxels) — only used when METHOD=realistic
-DISPLACEMENT_SIGMA=5
+DISPLACEMENT_SIGMA=2
 
 # Random seed for centre generation (leave empty for a random seed each run)
 SEED=""
@@ -83,7 +83,7 @@ MATCH_HISTOGRAMS=true
 # Fraction of denoising steps (from t=0, low-noise end) during which the
 # prev-frame channel is active. 0.3 = heatmap drives placement for 70% of steps,
 # prev_vol contributes texture for the final 30%. 1.0 = always active (no change).
-PREV_VOL_ACTIVE_FRAC=0.7
+PREV_VOL_ACTIVE_FRAC=0.9
 
 # Number of independent timeseries to generate.
 # With METHOD=realistic each sample gets its own centre sequence.

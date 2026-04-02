@@ -11,10 +11,6 @@ from pathlib import Path
 import logging
 from multiprocessing import cpu_count
 
-# Add parent directory to path
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
-
 from preprocessing.build_dataset_parallel import build_dataset_parallel
 
 logging.basicConfig(

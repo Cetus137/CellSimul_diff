@@ -29,9 +29,6 @@ import yaml
 from tqdm import tqdm
 import logging
 
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
-
 from preprocessing.extract_patches3d import extract_patches3d, save_patch_dataset3d
 from preprocessing.extract_centres import filter_border_cells
 

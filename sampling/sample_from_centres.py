@@ -13,9 +13,6 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import logging
 
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
-
 from models.unet import ConditionalUNet
 from models.diffusion import DDPM
 from preprocessing.generate_condition_maps import generate_conditioning_maps

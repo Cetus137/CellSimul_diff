@@ -13,8 +13,6 @@ import tifffile
 import logging
 import matplotlib.pyplot as plt
 
-sys.path.append(str(Path(__file__).parent.parent))
-
 from sampling.generate_centres3d import (
     generate_random_centres_simple3d,
     generate_random_centres_poisson3d,

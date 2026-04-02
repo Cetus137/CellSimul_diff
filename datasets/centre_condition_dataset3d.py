@@ -16,9 +16,6 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 import logging
 
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
-
 from preprocessing.generate_condition_maps3d import generate_conditioning_maps3d
 from utils.normalization import normalize_raw_image, to_minus_one_one
 

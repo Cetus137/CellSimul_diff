@@ -18,7 +18,6 @@ Usage:
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 from typing import List
 
@@ -26,8 +25,6 @@ import numpy as np
 import torch
 import tifffile
 import yaml
-
-sys.path.append(str(Path(__file__).parent.parent))
 
 from sampling.sample_two_frame3d import (
     load_model,

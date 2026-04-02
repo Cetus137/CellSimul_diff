@@ -16,12 +16,7 @@ from typing import Dict, Optional
 import logging
 from tqdm import tqdm
 import copy
-import sys
-
 from .visualizer import TrainingVisualizer
-
-# Import normalization utilities
-sys.path.append(str(Path(__file__).parent.parent))
 from utils.normalization import check_range
 
 logging.basicConfig(level=logging.INFO)
@@ -99,6 +94,7 @@ class Trainer:
         log_every: int = 100,
         save_every: int = 5000,
         validate_every: int = 2000,
+        max_val_batches: Optional[int] = None,
         visualize: bool = True,
         viz_dir: str = 'visualizations',
         low_noise_bias: bool = False,
@@ -168,6 +164,7 @@ class Trainer:
         self.log_every = log_every
         self.save_every = save_every
         self.validate_every = validate_every
+        self.max_val_batches = max_val_batches
         
         # State
         self.step = 0
@@ -458,6 +455,8 @@ class Trainer:
                 loss, _ = self.model.compute_loss(images, conditioning)
             total += loss.item()
             n += 1
+            if self.max_val_batches is not None and n >= self.max_val_batches:
+                break
         avg_loss = total / n
 
         # Save best checkpoint based on val loss
@@ -543,7 +542,10 @@ class Trainer:
         
         if self.scaler is not None:
             checkpoint['scaler_state_dict'] = self.scaler.state_dict()
-        
+
+        if self.visualizer is not None:
+            checkpoint['loss_history'] = self.visualizer.get_history()
+
         checkpoint_path = self.checkpoint_dir / name
         torch.save(checkpoint, checkpoint_path)
         logger.info(f"Saved checkpoint to {checkpoint_path}")
@@ -557,7 +559,7 @@ class Trainer:
         """
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
         self.step = checkpoint.get('step', 0)
@@ -572,7 +574,11 @@ class Trainer:
         
         if self.scaler is not None and 'scaler_state_dict' in checkpoint:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
-        
+
+        if self.visualizer is not None and 'loss_history' in checkpoint:
+            self.visualizer.set_history(checkpoint['loss_history'])
+            logger.info("Restored loss history from checkpoint")
+
         logger.info(f"Loaded checkpoint from {path} (step {self.step})")
 
 

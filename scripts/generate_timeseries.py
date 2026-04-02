@@ -10,7 +10,6 @@ Author: CellSimul Diffusion Project
 import argparse
 import logging
 import os
-import sys
 from pathlib import Path
 from typing import Optional, Tuple, List
 
@@ -19,9 +18,6 @@ import torch
 import tifffile
 from skimage import exposure
 from tqdm import tqdm
-
-# Add parent directory to path
-sys.path.append(str(Path(__file__).parent.parent))
 
 from sampling.inference_pipeline import CellSynthesizer
 from sampling.generate_centres import (

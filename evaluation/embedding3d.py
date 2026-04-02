@@ -10,7 +10,6 @@ linear_probe        — balanced accuracy of logistic regression on embeddings
 plot_umap           — coloured 2D UMAP scatter saved to file
 """
 
-import sys
 import logging
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -23,8 +22,6 @@ import umap
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.model_selection import train_test_split
-
-sys.path.append(str(Path(__file__).parent.parent))
 
 from preprocessing.generate_condition_maps3d import generate_conditioning_maps3d
 from utils.normalization import normalize_raw_image, to_minus_one_one
@@ -40,6 +37,7 @@ def build_joint_input(
     heatmap_sigma: float = 3.0,
     distance_percentile: float = 95.0,
     active_channels: Optional[dict] = None,
+    prev_frame: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Build the encoder's input tensors from raw numpy data.
@@ -52,10 +50,12 @@ def build_joint_input(
         active_channels:     Dict controlling which conditioning channels are built
                              (e.g. {"heatmap": True, "distance": False}).  When None
                              defaults to heatmap+distance (both True) for back-compat.
+        prev_frame:          If True, append a zeros channel for the prev-frame
+                             slot (frame-0 case for unified models).
 
     Returns:
         image_t: (1, D, H, W) float32 tensor in [-1, 1]
-        cond_t:  (C, D, H, W) float32 tensor matching active_channels
+        cond_t:  (C, D, H, W) float32 tensor matching active_channels (+1 if prev_frame)
     """
     if active_channels is None:
         active_channels = {"heatmap": True, "distance": True}
@@ -78,7 +78,12 @@ def build_joint_input(
     )  # (C, D, H, W) float32 in [0, 1]
 
     image_t = torch.from_numpy(img[np.newaxis]).float()     # (1, D, H, W)
-    cond_t  = torch.from_numpy(cond).float()                # (2, D, H, W)
+    cond_t  = torch.from_numpy(cond).float()
+
+    if prev_frame:
+        # Unified model: append zeros for the prev-frame channel (frame-0 case)
+        zeros = torch.zeros(1, *volume_shape, dtype=torch.float32)
+        cond_t = torch.cat([cond_t, zeros], dim=0)
 
     return image_t, cond_t
 
@@ -93,6 +98,7 @@ def extract_embeddings(
     heatmap_sigma: float = 3.0,
     distance_percentile: float = 95.0,
     active_channels: Optional[dict] = None,
+    prev_frame: bool = False,
 ) -> np.ndarray:
     """
     Encode a list of (image_np, centres_np) pairs through CellEncoder3D.
@@ -103,6 +109,7 @@ def extract_embeddings(
         device:     Target device.
         batch_size: Volumes per forward pass (reduce if OOM).
         heatmap_sigma, distance_percentile: Passed to build_joint_input.
+        prev_frame: If True, append a zeros prev-frame channel (unified models).
 
     Returns:
         (N, latent_dim) float32 numpy array, L2-normalised rows.
@@ -123,7 +130,8 @@ def extract_embeddings(
 
     for i, (image_np, centres_np) in enumerate(data_tuples):
         img_t, cond_t = build_joint_input(
-            image_np, centres_np, heatmap_sigma, distance_percentile, active_channels
+            image_np, centres_np, heatmap_sigma, distance_percentile,
+            active_channels, prev_frame,
         )
         img_batch.append(img_t)
         cond_batch.append(cond_t)

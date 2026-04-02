@@ -15,10 +15,6 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional
 import logging
-import sys
-
-# Import normalization utilities
-sys.path.append(str(Path(__file__).parent.parent))
 from utils.normalization import to_zero_one
 
 logger = logging.getLogger(__name__)
@@ -80,14 +76,30 @@ class TrainingVisualizer:
         """
         self.val_losses.append((step, val_loss))
     
+    def get_history(self) -> dict:
+        """Return loss history as a plain dict for checkpoint persistence."""
+        return {
+            'epochs':       list(self.epochs),
+            'train_losses': list(self.train_losses),
+            'train_steps':  list(self.train_steps),
+            'val_losses':   list(self.val_losses),
+        }
+
+    def set_history(self, history: dict):
+        """Restore loss history from a checkpoint (enables cross-run plots)."""
+        self.epochs       = history.get('epochs',       [])
+        self.train_losses = history.get('train_losses', [])
+        self.train_steps  = history.get('train_steps',  [])
+        self.val_losses   = history.get('val_losses',   [])
+
     def plot_loss_curves(self, save_name: str = 'loss_curves.png'):
         """
         Plot training and validation loss curves.
-        
+
         Args:
             save_name: Filename for saved plot
         """
-        if len(self.epochs) == 0:
+        if len(self.epochs) == 0 and len(self.val_losses) == 0:
             logger.warning("No metrics to plot")
             return
         

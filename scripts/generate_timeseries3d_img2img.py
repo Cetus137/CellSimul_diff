@@ -34,8 +34,6 @@ import numpy as np
 import tifffile
 import yaml
 
-sys.path.append(str(Path(__file__).parent.parent))
-
 from sampling.sample_from_centres3d import load_model3d, sample_batch_img2img3d
 
 logging.basicConfig(

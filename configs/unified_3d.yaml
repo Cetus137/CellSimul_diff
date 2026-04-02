@@ -8,7 +8,7 @@
 #            • Frame 0:   conditioning = [heatmap_t,  zeros          ]
 #            • Frame t+1: conditioning = [heatmap_t1, volume_t in 0-1]
 #
-# Conditioning: heatmap + prev_frame  (C = 2 total, distance excluded)
+# Conditioning: heatmap + prev_frame  (C = 2 total)
 #   Channel 0: Gaussian blob heatmap of target-frame centres  in [0, 1]
 #   Channel 1: Previous frame V_{t-1} re-ranged to [0, 1]     (zeros for first frame)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -22,10 +22,10 @@ random_seed: 42
 unified_dataset:
   patches_dirs:
   #  - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/"
-    - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node2_3d/"
+    - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/"
   pairs_dirs:
   #  - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/pairs/"
-    - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node2_3d/pairs/"
+    - "/users/kir-fritzsche/aif490/devel/tissue_analysis/CellSimul_diff/data_live_node1_3d/pairs/"
   # Relative weight given to each pair item vs. each single-frame item.
   # Both pools are ~equal size (~14 500 vs ~16 500 train samples), so 1.0 is
   # a sensible default.  Increase to e.g. 2.0 if temporal structure is under-learned.
@@ -57,10 +57,10 @@ unet:
   in_channels:  1
   out_channels: 1
 
-  # 2-channel conditioning: heatmap (geom) + prev_frame (appearance)
+  # 2-channel conditioning: heatmap + prev_frame
   conditioning:
     heatmap:  true    # Channel 0: Gaussian blobs at target-frame centres
-    distance: true   # Excluded — only heatmap used as geometry signal
+    distance: false   # disabled — redundant given heatmap + prev_frame
   prev_frame: true    # Channel 1: V_{t-1} in [0, 1]  (zeros for frame 0)
   # → condition_channels = 1 + 1 = 2
 
@@ -79,10 +79,11 @@ diffusion:
   beta_end:      0.02
   prediction_type: "epsilon"
   loss_type: "l2"
+  min_snr_gamma: 5.0    # Min-SNR weighting (Hang et al. 2023); null to disable
   cfg:
-    enabled:        true
-    dropout_prob:   0.1
-    guidance_scale: 3.0
+    enabled:        false
+    dropout_prob:   0.0
+    guidance_scale: 1.0
 
 # ── Optimizer ─────────────────────────────────────────────────────────────────
 optimizer:
@@ -100,8 +101,8 @@ scheduler:
 
 # ── DataLoader ────────────────────────────────────────────────────────────────
 dataloader:
-  batch_size:  1
-  num_workers: 4
+  batch_size:  2
+  num_workers: 8
 
 # ── Training ──────────────────────────────────────────────────────────────────
 training:
@@ -111,11 +112,12 @@ training:
   visualize:       true
 
   log_every:      100
-  save_every:     5000
-  validate_every: 5000
+  save_every:     2500
+  validate_every: 2500
+  max_val_batches: 200
 
-  checkpoint_dir: "checkpoints/unified_3d_node2_D_C"
-  viz_dir:        "visualizations/unified_3d_node2_D_C"
+  checkpoint_dir: "checkpoints/unified_3d_node1_C_no_cfg_SNR"
+  viz_dir:        "visualizations/unified_3d_node1_C_no_cfg_SNR"
   keep_last_n_checkpoints: 5
 
   ema:
@@ -125,7 +127,7 @@ training:
 
   small_data_mode:
     enabled:            true
-    p_uncond:           0.1
+    p_uncond:           0.0
     low_noise_bias:     false
     low_noise_fraction: 0.3
     low_noise_weight:   3.0
@@ -137,26 +139,20 @@ training:
     disable_cfg:          true
 
 # ── Centre generation (used by --method realistic in generate_timeseries_unified_3d.py) ──
-# Stats derived from data_live_node1_3d + data_live_node2_3d; matches frame1_3d.yaml.
+# Stats derived from data_live_node1_3d only (training data source).
 # Re-run scripts/analyze_training_stats.py --save_stats if training data changes.
 centre_generation_3d:
   border_margin: 10
   max_attempts:  50
-  n_mean:        25.97   # mean cells per 128³ patch
-  n_std:         7.57
-  n_min:         15      # p5  of training distribution
-  n_max:         41      # p95 of training distribution
-  min_distance:  25.61   # p5 of per-cell nearest-neighbour distances (voxels)
-  # 32-bin marginal KDE histograms; each axis sums to 1.0
-  density_grid_z: [0.0385, 0.0521, 0.0507, 0.0491, 0.0399, 0.0282, 0.0268, 0.032,  0.039,  0.0415,
-                   0.0412, 0.0366, 0.0348, 0.0344, 0.0331, 0.0324, 0.0324, 0.032,  0.031,  0.0317,
-                   0.0313, 0.0293, 0.0272, 0.0241, 0.0218, 0.0194, 0.0195, 0.0194, 0.0189, 0.019,
-                   0.0175, 0.0152]
-  density_grid_y: [0.0144, 0.0284, 0.0373, 0.0355, 0.0337, 0.0338, 0.0334, 0.0326, 0.0303, 0.0311,
-                   0.0314, 0.0307, 0.0314, 0.0318, 0.0319, 0.0316, 0.0315, 0.0319, 0.0319, 0.0311,
-                   0.0324, 0.0332, 0.0332, 0.0331, 0.0311, 0.0324, 0.0327, 0.0343, 0.0369, 0.0381,
-                   0.0233, 0.0138]
-  density_grid_x: [0.015,  0.0278, 0.0371, 0.0366, 0.034,  0.0325, 0.0324, 0.0319, 0.0317, 0.0314,
-                   0.0322, 0.0322, 0.0324, 0.0318, 0.0322, 0.0317, 0.032,  0.0323, 0.0321, 0.0308,
-                   0.032,  0.0323, 0.033,  0.0321, 0.032,  0.0313, 0.0328, 0.0353, 0.0359, 0.0359,
-                   0.0227, 0.0145]
+  n_mean:        33.04  # mean cells per 128³ patch (node1 only)
+  n_std:         8.39
+  n_min:         17     # p5  of training distribution
+  n_max:         44     # p95 of training distribution
+  min_distance:  27.2   # p5 of per-cell nearest-neighbour distances (voxels)
+  # 16-bin marginal KDE histograms; each axis sums to 1.0 (node1 only)
+  density_grid_z: [0.17334,  0.070774, 0.02802,  0.059681, 0.10931,  0.08274,  0.055821, 0.059164,
+                   0.07215,  0.059877, 0.050016, 0.052995, 0.044975, 0.038755, 0.024859, 0.017524]
+  density_grid_y: [0.041989, 0.074925, 0.067955, 0.064743, 0.060591, 0.063199, 0.066294, 0.064816,
+                   0.059644, 0.061611, 0.06636,  0.066804, 0.05837,  0.064539, 0.080388, 0.037772]
+  density_grid_x: [0.047182, 0.071524, 0.064947, 0.063985, 0.061589, 0.064058, 0.063701, 0.064685,
+                   0.064743, 0.063862, 0.06416,  0.065792, 0.061407, 0.066906, 0.072026, 0.039433]

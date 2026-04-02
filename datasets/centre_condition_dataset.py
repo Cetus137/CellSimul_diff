@@ -11,12 +11,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 import logging
 
-import sys
-sys.path.append(str(Path(__file__).parent.parent / 'preprocessing'))
-from generate_condition_maps import generate_conditioning_maps
-
-# Import normalization utilities
-sys.path.append(str(Path(__file__).parent.parent))
+from preprocessing.generate_condition_maps import generate_conditioning_maps
 from utils.normalization import normalize_raw_image, to_minus_one_one
 
 logging.basicConfig(level=logging.INFO)

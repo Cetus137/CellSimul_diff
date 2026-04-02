@@ -8,9 +8,6 @@ import yaml
 from pathlib import Path
 from typing import Optional, Tuple
 import logging
-import sys
-
-sys.path.append(str(Path(__file__).parent.parent))
 
 from models.diffusion3d import DDPM3D
 from models.unet3d import ConditionalUNet3D
@@ -70,10 +67,10 @@ def load_model3d(checkpoint_path: str, config_path: str, device: str = "cuda") -
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         logger.info(f"Loaded checkpoint from epoch {checkpoint.get('epoch', '?')}")
     else:
-        model.load_state_dict(checkpoint)
+        model.load_state_dict(checkpoint, strict=False)
     
     model = model.to(device)
     model.eval()

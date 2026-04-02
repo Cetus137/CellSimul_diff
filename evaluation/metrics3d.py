@@ -14,7 +14,6 @@ compare_all_metrics         — runs all of the above, returns flat summary dict
 """
 
 import logging
-import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -23,8 +22,6 @@ import matplotlib.pyplot as plt
 from scipy import stats
 from scipy.stats import wasserstein_distance
 from skimage.filters import threshold_otsu
-
-sys.path.append(str(Path(__file__).parent.parent))
 
 logger = logging.getLogger(__name__)
 

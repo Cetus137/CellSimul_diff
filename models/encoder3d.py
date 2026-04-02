@@ -28,7 +28,6 @@ encoder = CellEncoder3D.from_ddpm_checkpoint(
 z = encoder.encode(image_tensor, cond_tensor)   # (B, 128)
 """
 
-import sys
 from pathlib import Path
 from typing import List
 
@@ -36,8 +35,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import yaml
-
-sys.path.append(str(Path(__file__).parent.parent))
 
 from models.unet3d import ConditionalUNet3D, Downsample3D, ResidualBlock3D
 

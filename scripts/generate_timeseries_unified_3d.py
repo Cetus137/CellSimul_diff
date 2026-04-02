@@ -11,8 +11,8 @@ Generates a sequence of N volumetric frames autoregressively:
 A single unified checkpoint (configs/unified_3d.yaml) is used throughout.
 Each generated V_t is reused immediately as the prev-frame conditioning for V_{t+1}.
 
-Two centre-generation modes
----------------------------
+Three centre-generation modes
+------------------------------
   --method from_files  (default)
       Load pre-generated centre files from --centres_dir.
       Files must be named: synthetic_3d_NNNN_centres.npy
@@ -24,6 +24,16 @@ Two centre-generation modes
       an isotropic Gaussian displacement (--displacement_sigma voxels) to the
       previous frame's centres, modelling realistic inter-frame cell motion.
 
+  --method real_centres
+      Sample frame-0 centres from a real training patch (guaranteed in-distribution).
+      Load *_centres.npy files from --patches_dir (e.g. data_live_node2_3d/train),
+      pick one at random per sample, then evolve each subsequent frame using a
+      log-normal displacement whose parameters are fitted to the training data:
+        magnitude ~ LogNormal(μ=ln(median), σ=shape)
+        direction ~ isotropic uniform on unit sphere
+      Defaults: --lognormal_median 4.99  --lognormal_sigma 0.751.
+      No cell birth or death; all cells persist across all frames.
+
 Usage:
     # Load pre-computed centre files:
     python -m scripts.generate_timeseries_unified_3d \\
@@ -33,12 +43,21 @@ Usage:
         --start_t 0 --num_frames 10 \\
         --out_dir timeseries_output/unified_3d/
 
-    # Generate centres on-the-fly:
+    # Generate centres on-the-fly from config stats:
     python -m scripts.generate_timeseries_unified_3d \\
         --checkpoint checkpoints/unified_3d/best.pt \\
         --config     configs/unified_3d.yaml \\
         --method realistic \\
         --displacement_sigma 3.0 \\
+        --num_frames 10 \\
+        --out_dir timeseries_output/unified_3d/
+
+    # Start from real training centres (recommended):
+    python -m scripts.generate_timeseries_unified_3d \\
+        --checkpoint checkpoints/unified_3d/best.pt \\
+        --config     configs/unified_3d.yaml \\
+        --method real_centres \\
+        --patches_dir data_live_node2_3d/train \\
         --num_frames 10 \\
         --out_dir timeseries_output/unified_3d/
 
@@ -51,7 +70,6 @@ Output per frame:
 import argparse
 import csv
 import logging
-import sys
 from pathlib import Path
 from typing import List, Optional
 
@@ -60,8 +78,6 @@ import torch
 import tifffile
 import yaml
 from skimage.exposure import match_histograms as skimage_match_histograms
-
-sys.path.append(str(Path(__file__).parent.parent))
 
 from sampling.generate_centres3d import generate_realistic_centres3d
 from sampling.sample_two_frame3d import (
@@ -144,6 +160,58 @@ def displace_centres(
         displaced[:, 0] = np.clip(displaced[:, 0], border_margin, d - border_margin)
         displaced[:, 1] = np.clip(displaced[:, 1], border_margin, h - border_margin)
         displaced[:, 2] = np.clip(displaced[:, 2], border_margin, w - border_margin)
+
+    return displaced
+
+
+def displace_centres_lognormal(
+    centres: np.ndarray,
+    mu: float,
+    sigma: float,
+    volume_shape: tuple,
+    border_margin: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """
+    Derive next-frame centres using log-normal displacement magnitudes.
+
+    Each cell moves by a displacement whose magnitude is drawn from
+    LogNormal(mu, sigma) and whose direction is drawn uniformly from the
+    unit sphere (isotropic).  Cells are clamped to stay within the valid
+    interior after displacement.
+
+    Parameters
+    ----------
+    centres : (N, 3) float32  current-frame centres in (z, y, x) order.
+    mu      : log-normal location parameter  = ln(median displacement).
+    sigma   : log-normal scale  (shape) parameter.
+    volume_shape : (D, H, W) volume dimensions.
+    border_margin : minimum distance from each volume edge (voxels).
+    rng     : numpy Generator instance for reproducibility.
+
+    Returns
+    -------
+    (N, 3) float32 displaced centres, clamped within the valid interior.
+    """
+    N = len(centres)
+    if N == 0:
+        return centres.copy()
+
+    # Displacement magnitudes from log-normal distribution
+    magnitudes = np.exp(rng.normal(mu, sigma, N)).astype(np.float32)  # (N,)
+
+    # Isotropic random directions on the unit sphere
+    directions = rng.standard_normal((N, 3)).astype(np.float32)
+    norms = np.linalg.norm(directions, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-8)
+    directions /= norms  # unit vectors
+
+    displaced = (centres + magnitudes[:, None] * directions).astype(np.float32)
+
+    d, h, w = volume_shape
+    displaced[:, 0] = np.clip(displaced[:, 0], border_margin, d - border_margin)
+    displaced[:, 1] = np.clip(displaced[:, 1], border_margin, h - border_margin)
+    displaced[:, 2] = np.clip(displaced[:, 2], border_margin, w - border_margin)
 
     return displaced
 
@@ -337,12 +405,14 @@ def main():
     )
     parser.add_argument(
         "--method", default="from_files",
-        choices=["from_files", "realistic"],
+        choices=["from_files", "realistic", "real_centres"],
         help=(
             "Centre generation strategy. "
             "'from_files': load synthetic_3d_NNNN_centres.npy from --centres_dir. "
             "'realistic': generate frame-0 centres from config statistics, then evolve "
-            "each subsequent frame with Gaussian displacement (--displacement_sigma)."
+            "each subsequent frame with Gaussian displacement (--displacement_sigma). "
+            "'real_centres': load a random real training patch from --patches_dir for frame 0, "
+            "then evolve with log-normal displacement (--lognormal_median, --lognormal_sigma)."
         )
     )
     parser.add_argument(
@@ -350,9 +420,25 @@ def main():
         help="Directory with synthetic_3d_NNNN_centres.npy files (required for --method from_files)"
     )
     parser.add_argument(
+        "--patches_dir", default=None,
+        help="Directory containing *_centres.npy training patches "
+             "(required for --method real_centres, e.g. data_live_node2_3d/train)"
+    )
+    parser.add_argument(
         "--displacement_sigma", type=float, default=3.0,
         help="Std-dev (voxels) of inter-frame Gaussian displacement (--method realistic). "
              "Typical range: 2–6 voxels. Default: 3.0"
+    )
+    parser.add_argument(
+        "--lognormal_median", type=float, default=4.99,
+        help="Median displacement magnitude in voxels for --method real_centres. "
+             "Sets the log-normal location: mu=ln(median). "
+             "Fitted to node2 training data. Default: 4.99"
+    )
+    parser.add_argument(
+        "--lognormal_sigma", type=float, default=0.751,
+        help="Log-normal shape (scale) parameter for --method real_centres. "
+             "Fitted to node2 training data. Default: 0.751"
     )
     parser.add_argument(
         "--seed", type=int, default=None,
@@ -490,6 +576,7 @@ def main():
     sim_size     = args.volume_size + 2 * sim_padding
     sim_shape    = (sim_size, sim_size, sim_size)
     # Sequences are stored in simulation space only for realistic + padding > 0.
+    # real_centres patches are already in model space — no sim-space needed.
     centres_are_in_sim_space = (args.method == "realistic" and sim_padding > 0)
     if centres_are_in_sim_space:
         logger.info(
@@ -510,7 +597,7 @@ def main():
         # All samples share the same spatial centres; diversity comes from diffusion noise.
         all_centre_sequences = [_base_seq] * args.num_samples
 
-    else:  # realistic
+    elif args.method == "realistic":
         cg = cfg.get("centre_generation_3d")
         if not cg:
             parser.error(
@@ -573,6 +660,47 @@ def main():
                     "Sample %04d centre sequence: %d cells  displacement_sigma=%.1f vox",
                     s, len(c0), args.displacement_sigma,
                 )
+
+    else:  # real_centres
+        if args.patches_dir is None:
+            parser.error("--patches_dir is required for --method real_centres")
+        patches_dir = Path(args.patches_dir)
+        centre_files = sorted(patches_dir.glob("*_centres.npy"))
+        if not centre_files:
+            parser.error(f"No *_centres.npy files found in {patches_dir}")
+        logger.info(
+            "Found %d real centre files in %s", len(centre_files), patches_dir
+        )
+
+        rng = np.random.default_rng(args.seed)
+        border_margin = int(cfg.get("centre_generation_3d", {}).get("border_margin", 10))
+        lognormal_mu = float(np.log(args.lognormal_median))
+        logger.info(
+            "Log-normal displacement: median=%.2f vox  sigma=%.3f  (mu=%.4f)",
+            args.lognormal_median, args.lognormal_sigma, lognormal_mu,
+        )
+
+        for s in range(args.num_samples):
+            # Pick a random real centre file for frame 0
+            c0_file = centre_files[rng.integers(0, len(centre_files))]
+            c0 = np.load(c0_file).astype(np.float32)
+            logger.info(
+                "Sample %04d: %d real centres from %s", s, len(c0), c0_file.name
+            )
+
+            seq: List[np.ndarray] = [c0]
+            for _ in range(args.num_frames - 1):
+                seq.append(
+                    displace_centres_lognormal(
+                        seq[-1],
+                        mu=lognormal_mu,
+                        sigma=args.lognormal_sigma,
+                        volume_shape=volume_shape,
+                        border_margin=border_margin,
+                        rng=rng,
+                    )
+                )
+            all_centre_sequences.append(seq)
 
     # ── Helper: per-sample output directory ───────────────────────────────────
     def sample_out_dir(s: int) -> Path:

@@ -67,7 +67,8 @@ class DDPM3D(nn.Module):
         prediction_type: str = 'epsilon',
         loss_type: str = 'l2',
         data_min: float = -1.0,
-        data_max: float = 1.0
+        data_max: float = 1.0,
+        min_snr_gamma: Optional[float] = None,
     ):
         super().__init__()
 
@@ -77,6 +78,7 @@ class DDPM3D(nn.Module):
         self.loss_type = loss_type
         self.data_min = data_min
         self.data_max = data_max
+        self.min_snr_gamma = min_snr_gamma
 
         if beta_schedule == 'linear':
             betas = linear_beta_schedule(timesteps, beta_start, beta_end)
@@ -97,6 +99,10 @@ class DDPM3D(nn.Module):
         self.register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
         self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
         self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1.0 - alphas_cumprod))
+
+        # Min-SNR weighting (Hang et al. 2023): SNR(t) = ᾱ_t / (1 − ᾱ_t)
+        snr = alphas_cumprod / (1.0 - alphas_cumprod)
+        self.register_buffer('snr', snr)
 
         posterior_variance = betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
         self.register_buffer('posterior_variance', posterior_variance)
@@ -684,13 +690,24 @@ class DDPM3D(nn.Module):
         pred  = self.predict_noise(x_t, t, conditioning)
 
         if self.loss_type == 'l1':
-            loss = F.l1_loss(pred, noise)
+            loss_elem = F.l1_loss(pred, noise, reduction='none')
         elif self.loss_type == 'l2':
-            loss = F.mse_loss(pred, noise)
+            loss_elem = F.mse_loss(pred, noise, reduction='none')
         elif self.loss_type == 'huber':
-            loss = F.smooth_l1_loss(pred, noise)
+            loss_elem = F.smooth_l1_loss(pred, noise, reduction='none')
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
+
+        # Mean over spatial+channel dims → (B,)
+        loss_per_sample = loss_elem.mean(dim=list(range(1, loss_elem.ndim)))
+
+        if self.min_snr_gamma is not None:
+            # weight(t) = min(SNR(t), γ) / SNR(t)  for ε-prediction
+            snr_t   = self.snr[t]                                   # (B,)
+            weights = torch.clamp(snr_t, max=self.min_snr_gamma) / snr_t
+            loss = (weights * loss_per_sample).mean()
+        else:
+            loss = loss_per_sample.mean()
 
         diag = {
             'noise_true_norm': torch.norm(noise.view(batch_size, -1), dim=1).mean().detach(),

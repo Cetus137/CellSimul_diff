@@ -13,15 +13,12 @@ Usage:
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.optim as optim
 import yaml
-
-sys.path.append(str(Path(__file__).parent.parent))
 
 from datasets.temporal_pair_dataset import get_temporal_dataloader
 from models.diffusion import DDPM

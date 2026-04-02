@@ -9,8 +9,6 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.append(str(Path(__file__).parent.parent))
-
 from sampling.inference_pipeline import CellSynthesizer
 import logging
 
